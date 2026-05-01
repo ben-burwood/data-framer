@@ -30,6 +30,7 @@ const columnPanelOpen = ref(false);
 // ---------------------------------------------------------------------------
 const LAT_NAMES = ["lat", "latitude"];
 const LON_NAMES = ["lon", "lng", "longitude"];
+const H3_NAMES  = ["h3", "h3_index", "h3index", "h3_cell", "h3cell", "h3point"];
 
 const fileName = computed(() => fileInfo.value?.path.split(/[\\/]/).pop() ?? "");
 
@@ -39,7 +40,12 @@ const latColumn = computed(() =>
 const lonColumn = computed(() =>
   fileInfo.value?.columns.find(c => LON_NAMES.includes(c.name.toLowerCase()))?.name ?? null
 );
-const hasGeoColumns = computed(() => !!latColumn.value && !!lonColumn.value);
+const h3Column = computed(() =>
+  fileInfo.value?.columns.find(c => H3_NAMES.includes(c.name.toLowerCase()))?.name ?? null
+);
+const hasMapData = computed(() =>
+  (!!latColumn.value && !!lonColumn.value) || !!h3Column.value
+);
 
 const hiddenColumnCount = computed(() => {
   if (!fileInfo.value) return 0;
@@ -175,7 +181,7 @@ function onColumnsReset() {
         >
           Columns<span v-if="hiddenColumnCount > 0" class="badge">{{ hiddenColumnCount }}</span>
         </button>
-        <div v-if="hasGeoColumns" class="view-toggle">
+        <div v-if="hasMapData" class="view-toggle">
           <button :class="{ active: currentView === 'table' }" @click="currentView = 'table'">Table</button>
           <button :class="{ active: currentView === 'map' }" @click="currentView = 'map'">Map</button>
         </div>
@@ -209,12 +215,13 @@ function onColumnsReset() {
         @row-count-changed="filteredRowCount = $event"
       />
       <MapView
-        v-if="hasGeoColumns"
+        v-if="hasMapData"
         v-show="currentView === 'map'"
         :active="currentView === 'map'"
         :activeFilters="activeFilters"
-        :latColumn="latColumn!"
-        :lonColumn="lonColumn!"
+        :latColumn="latColumn"
+        :lonColumn="lonColumn"
+        :h3Column="h3Column"
       />
     </template>
   </div>
