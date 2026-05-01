@@ -38,6 +38,78 @@ interface RowsResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Filter types
+// ---------------------------------------------------------------------------
+type FilterOp =
+  | "eq" | "neq"
+  | "gt" | "gte" | "lt" | "lte" | "between"
+  | "contains" | "not_contains" | "starts_with" | "ends_with"
+  | "is_true" | "is_false"
+  | "is_null" | "is_not_null";
+
+interface FilterSpec {
+  column: string;
+  op: FilterOp;
+  value: string;
+  value2: string;
+}
+
+interface OpDef {
+  label: string;
+  op: FilterOp;
+  hasValue: boolean;
+  hasTwoValues: boolean;
+}
+
+const NULL_OPS: OpDef[] = [
+  { label: "is null",     op: "is_null",     hasValue: false, hasTwoValues: false },
+  { label: "is not null", op: "is_not_null", hasValue: false, hasTwoValues: false },
+];
+
+const NUMERIC_OPS: OpDef[] = [
+  { label: "equals",                op: "eq",      hasValue: true,  hasTwoValues: false },
+  { label: "not equals",            op: "neq",     hasValue: true,  hasTwoValues: false },
+  { label: "greater than",          op: "gt",      hasValue: true,  hasTwoValues: false },
+  { label: "greater than or equal", op: "gte",     hasValue: true,  hasTwoValues: false },
+  { label: "less than",             op: "lt",      hasValue: true,  hasTwoValues: false },
+  { label: "less than or equal",    op: "lte",     hasValue: true,  hasTwoValues: false },
+  { label: "between",               op: "between", hasValue: true,  hasTwoValues: true  },
+  ...NULL_OPS,
+];
+
+const DATE_OPS: OpDef[] = [
+  { label: "equals",       op: "eq",      hasValue: true,  hasTwoValues: false },
+  { label: "not equals",   op: "neq",     hasValue: true,  hasTwoValues: false },
+  { label: "after",        op: "gt",      hasValue: true,  hasTwoValues: false },
+  { label: "after or on",  op: "gte",     hasValue: true,  hasTwoValues: false },
+  { label: "before",       op: "lt",      hasValue: true,  hasTwoValues: false },
+  { label: "before or on", op: "lte",     hasValue: true,  hasTwoValues: false },
+  { label: "between",      op: "between", hasValue: true,  hasTwoValues: true  },
+  ...NULL_OPS,
+];
+
+const OPS_BY_DTYPE: Record<Dtype, OpDef[]> = {
+  string: [
+    { label: "equals",       op: "eq",          hasValue: true,  hasTwoValues: false },
+    { label: "not equals",   op: "neq",         hasValue: true,  hasTwoValues: false },
+    { label: "contains",     op: "contains",    hasValue: true,  hasTwoValues: false },
+    { label: "not contains", op: "not_contains",hasValue: true,  hasTwoValues: false },
+    { label: "starts with",  op: "starts_with", hasValue: true,  hasTwoValues: false },
+    { label: "ends with",    op: "ends_with",   hasValue: true,  hasTwoValues: false },
+    ...NULL_OPS,
+  ],
+  integer:  NUMERIC_OPS,
+  float:    NUMERIC_OPS,
+  boolean: [
+    { label: "is true",  op: "is_true",  hasValue: false, hasTwoValues: false },
+    { label: "is false", op: "is_false", hasValue: false, hasTwoValues: false },
+    ...NULL_OPS,
+  ],
+  date:     DATE_OPS,
+  datetime: DATE_OPS,
+};
+
+// ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
 type ViewState = "empty" | "loading" | "loaded";
@@ -45,6 +117,10 @@ type ViewState = "empty" | "loading" | "loaded";
 const view = ref<ViewState>("empty");
 const fileInfo = ref<FileInfo | null>(null);
 const gridApi = ref<GridApi | null>(null);
+const showFilters = ref(false);
+const pendingFilters = ref<FilterSpec[]>([]);
+const activeFilters = ref<FilterSpec[]>([]);
+const filteredRowCount = ref(0);
 
 const columnDefs = computed<ColDef[]>(() =>
   fileInfo.value ? schemaToColDefs(fileInfo.value.columns) : []
@@ -59,7 +135,94 @@ const defaultColDef: ColDef = {
 };
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Filter helpers
+// ---------------------------------------------------------------------------
+function opDefsForFilter(f: FilterSpec): OpDef[] {
+  const col = fileInfo.value?.columns.find((c) => c.name === f.column);
+  return col ? OPS_BY_DTYPE[col.dtype] : [];
+}
+
+function currentOpDef(f: FilterSpec): OpDef | undefined {
+  return opDefsForFilter(f).find((d) => d.op === f.op);
+}
+
+function onColumnChange(f: FilterSpec) {
+  const defs = opDefsForFilter(f);
+  if (defs.length > 0) {
+    f.op = defs[0].op;
+    f.value = "";
+    f.value2 = "";
+  }
+}
+
+function inputTypeForFilter(f: FilterSpec): string {
+  const col = fileInfo.value?.columns.find((c) => c.name === f.column);
+  switch (col?.dtype) {
+    case "integer":
+    case "float":    return "number";
+    case "date":     return "date";
+    case "datetime": return "datetime-local";
+    default:         return "text";
+  }
+}
+
+function addFilter() {
+  const firstCol = fileInfo.value?.columns[0];
+  if (!firstCol) return;
+  pendingFilters.value.push({
+    column: firstCol.name,
+    op: OPS_BY_DTYPE[firstCol.dtype][0].op,
+    value: "",
+    value2: "",
+  });
+}
+
+function removeFilter(idx: number) {
+  pendingFilters.value.splice(idx, 1);
+}
+
+// datetime-local inputs give "YYYY-MM-DDTHH:MM" but the backend needs seconds.
+function normalizeDateTime(value: string): string {
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value) ? value + ":00" : value;
+}
+
+function applyFilters() {
+  // Validate: all filters with a value input must have a non-empty value.
+  for (const f of pendingFilters.value) {
+    const def = currentOpDef(f);
+    if (!def) continue;
+    // String() coercion needed: <input type="number"> v-model returns a JS number, not a string.
+    if ((def.hasValue && !String(f.value ?? "").trim()) || (def.hasTwoValues && !String(f.value2 ?? "").trim())) {
+      alert("Please fill in all filter values before applying.");
+      return;
+    }
+  }
+
+  activeFilters.value = pendingFilters.value.map((f) => {
+    const dtype = fileInfo.value?.columns.find((c) => c.name === f.column)?.dtype ?? "string";
+    // Stringify: number inputs yield JS numbers; Rust FilterSpec expects strings.
+    const val  = String(f.value  ?? "");
+    const val2 = String(f.value2 ?? "");
+    const isDatetime = dtype === "datetime";
+    return {
+      ...f,
+      value:  isDatetime ? normalizeDateTime(val)  : val,
+      value2: isDatetime ? normalizeDateTime(val2) : val2,
+    };
+  });
+
+  gridApi.value?.purgeInfiniteCache();
+}
+
+function clearFilters() {
+  pendingFilters.value = [];
+  activeFilters.value = [];
+  filteredRowCount.value = 0;
+  gridApi.value?.purgeInfiniteCache();
+}
+
+// ---------------------------------------------------------------------------
+// Grid helpers
 // ---------------------------------------------------------------------------
 function schemaToColDefs(columns: ColumnInfo[]): ColDef[] {
   return columns.map((c) => ({
@@ -80,8 +243,14 @@ function buildDatasource(): IDatasource {
         limit: endRow - startRow,
         sortCol: sortModel[0]?.colId ?? null,
         sortDesc: sortModel[0]?.sort === "desc",
+        filters: activeFilters.value,
       })
-        .then((r) => params.successCallback(r.rows, r.total_rows))
+        .then((r) => {
+          if (filteredRowCount.value !== r.total_rows) {
+            filteredRowCount.value = r.total_rows;
+          }
+          params.successCallback(r.rows, r.total_rows);
+        })
         .catch((err) => {
           console.error("get_rows failed:", err);
           params.failCallback();
@@ -95,7 +264,6 @@ function buildDatasource(): IDatasource {
 // ---------------------------------------------------------------------------
 function onGridReady(event: GridReadyEvent) {
   gridApi.value = event.api;
-  // If a file is already loaded (e.g. after hot-reload), wire up the datasource.
   if (fileInfo.value) {
     event.api.setGridOption("datasource", buildDatasource());
   }
@@ -114,12 +282,15 @@ async function openFile() {
 
   view.value = "loading";
   gridApi.value = null;
+  showFilters.value = false;
+  pendingFilters.value = [];
+  activeFilters.value = [];
+  filteredRowCount.value = 0;
 
   try {
     const info = await invoke<FileInfo>("load_file", { path });
     fileInfo.value = info;
     view.value = "loaded";
-    // onGridReady fires after the grid mounts and sets the datasource there.
   } catch (err) {
     view.value = "empty";
     alert(`Failed to load file:\n${err}`);
@@ -147,9 +318,62 @@ async function openFile() {
     <template v-else>
       <div class="toolbar">
         <span class="file-name">{{ fileName }}</span>
-        <span class="row-count">{{ fileInfo!.total_rows.toLocaleString() }} rows</span>
+        <span class="row-count">
+          <template v-if="activeFilters.length > 0">
+            {{ filteredRowCount.toLocaleString() }} / {{ fileInfo!.total_rows.toLocaleString() }} rows
+          </template>
+          <template v-else>
+            {{ fileInfo!.total_rows.toLocaleString() }} rows
+          </template>
+        </span>
+        <button
+          class="toolbar-btn filters-btn"
+          :class="{ active: showFilters }"
+          @click="showFilters = !showFilters"
+        >
+          Filters<span v-if="activeFilters.length > 0" class="badge">{{ activeFilters.length }}</span>
+        </button>
         <button class="toolbar-btn" @click="openFile">Open File</button>
       </div>
+
+      <!-- Filter panel -->
+      <div v-if="showFilters" class="filter-panel">
+        <div v-for="(f, i) in pendingFilters" :key="i" class="filter-row">
+          <select v-model="f.column" @change="onColumnChange(f)" class="filter-select">
+            <option v-for="col in fileInfo!.columns" :key="col.name" :value="col.name">
+              {{ col.name }}
+            </option>
+          </select>
+          <select v-model="f.op" class="filter-select op-select">
+            <option v-for="def in opDefsForFilter(f)" :key="def.op" :value="def.op">
+              {{ def.label }}
+            </option>
+          </select>
+          <input
+            v-if="currentOpDef(f)?.hasValue"
+            v-model="f.value"
+            :type="inputTypeForFilter(f)"
+            class="filter-value"
+            placeholder="value"
+          />
+          <input
+            v-if="currentOpDef(f)?.hasTwoValues"
+            v-model="f.value2"
+            :type="inputTypeForFilter(f)"
+            class="filter-value"
+            placeholder="to"
+          />
+          <button class="remove-btn" @click="removeFilter(i)" title="Remove filter">×</button>
+        </div>
+        <div class="filter-actions">
+          <button class="add-filter-btn" @click="addFilter">+ Add Filter</button>
+          <div class="filter-action-btns">
+            <button class="clear-btn" @click="clearFilters">Clear All</button>
+            <button class="apply-btn" @click="applyFilters">Apply</button>
+          </div>
+        </div>
+      </div>
+
       <AgGridVue
         class="ag-theme-quartz grid"
         :columnDefs="columnDefs"
@@ -264,9 +488,153 @@ button:disabled {
 }
 
 .toolbar-btn {
-  margin-left: auto;
   padding: 4px 14px;
   font-size: 0.8rem;
+}
+
+.toolbar-btn:last-child {
+  margin-left: auto;
+}
+
+.filters-btn {
+  background: transparent;
+  color: #444;
+  border: 1px solid #d0d0d0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.filters-btn:hover:not(:disabled) {
+  background: #f0f0f0;
+}
+
+.filters-btn.active {
+  background: #efefff;
+  color: #646cff;
+  border-color: #646cff;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: #646cff;
+  color: #fff;
+  font-size: 0.7rem;
+  font-weight: 700;
+  min-width: 16px;
+  height: 16px;
+  border-radius: 8px;
+  padding: 0 4px;
+}
+
+/* ---- Filter panel ---- */
+.filter-panel {
+  padding: 8px 14px 4px;
+  background: #fafafa;
+  border-bottom: 1px solid #e0e0e0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.filter-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.filter-select {
+  padding: 4px 6px;
+  font-size: 0.8rem;
+  font-family: inherit;
+  border: 1px solid #d0d0d0;
+  border-radius: 6px;
+  background: #fff;
+  cursor: pointer;
+}
+
+.filter-select.op-select {
+  min-width: 120px;
+}
+
+.filter-value {
+  padding: 4px 8px;
+  font-size: 0.8rem;
+  font-family: inherit;
+  border: 1px solid #d0d0d0;
+  border-radius: 6px;
+  width: 160px;
+}
+
+.remove-btn {
+  padding: 2px 8px;
+  font-size: 1rem;
+  line-height: 1;
+  background: transparent;
+  color: #999;
+  border: 1px solid #d0d0d0;
+  border-radius: 6px;
+}
+
+.remove-btn:hover:not(:disabled) {
+  background: #fee2e2;
+  color: #b91c1c;
+  border-color: #fca5a5;
+}
+
+.filter-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 0 6px;
+}
+
+.filter-action-btns {
+  display: flex;
+  gap: 6px;
+}
+
+.add-filter-btn {
+  padding: 4px 12px;
+  font-size: 0.8rem;
+  background: transparent;
+  color: #646cff;
+  border: 1px dashed #646cff;
+  border-radius: 6px;
+}
+
+.add-filter-btn:hover:not(:disabled) {
+  background: #efefff;
+}
+
+.clear-btn {
+  padding: 4px 12px;
+  font-size: 0.8rem;
+  background: transparent;
+  color: #555;
+  border: 1px solid #d0d0d0;
+  border-radius: 6px;
+}
+
+.clear-btn:hover:not(:disabled) {
+  background: #f0f0f0;
+}
+
+.apply-btn {
+  padding: 4px 16px;
+  font-size: 0.8rem;
+  background: #646cff;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+}
+
+.apply-btn:hover:not(:disabled) {
+  background: #535bf2;
 }
 
 /* ---- Grid ---- */

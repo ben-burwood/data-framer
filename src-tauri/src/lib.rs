@@ -30,7 +30,7 @@ fn load_file(path: String, state: State<'_, AppState>) -> Result<FileInfo, Strin
     })
 }
 
-/// Return a paginated, optionally sorted slice of the loaded file.
+/// Return a paginated, optionally sorted, optionally filtered slice of the loaded file.
 /// Only `limit` rows are collected and sent over IPC.
 #[tauri::command]
 fn get_rows(
@@ -38,31 +38,40 @@ fn get_rows(
     limit: i64,
     sort_col: Option<String>,
     sort_desc: bool,
+    filters: Vec<datastore::FilterSpec>,
     state: State<'_, AppState>,
 ) -> Result<RowsResponse, String> {
-    let (file_path, total_rows) = {
+    let (file_path, unfiltered_rows, schema) = {
         let guard = state.file.lock().unwrap();
         let loaded = guard.as_ref().ok_or("No file loaded")?;
-        (loaded.path.clone(), loaded.total_rows)
+        (loaded.path.clone(), loaded.total_rows, loaded.schema.clone())
     };
 
-    let mut lf = datastore::scan_file(&file_path)?;
+    let lf = datastore::scan_file(&file_path)?;
+    let lf = datastore::apply_filters(lf, &filters, &schema)?;
 
-    if let Some(col) = sort_col {
-        lf = lf.sort(
+    // Count filtered rows only when filters are active (avoids a full scan otherwise).
+    let total_rows = if filters.is_empty() {
+        unfiltered_rows
+    } else {
+        datastore::count_lf(lf.clone())?
+    };
+
+    let lf = if let Some(col) = sort_col {
+        lf.sort(
             [col.as_str()],
             SortMultipleOptions::default().with_order_descending(sort_desc),
-        );
-    }
+        )
+    } else {
+        lf
+    };
 
     let df = lf
         .slice(offset, limit as u32)
         .collect()
         .map_err(|e| e.to_string())?;
 
-    let rows = datastore::frame_to_rows(&df);
-
-    Ok(RowsResponse { rows, total_rows })
+    Ok(RowsResponse { rows: datastore::frame_to_rows(&df), total_rows })
 }
 
 // ---------------------------------------------------------------------------

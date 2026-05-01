@@ -1,5 +1,5 @@
 use polars::prelude::*;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 
 // ---------------------------------------------------------------------------
@@ -63,18 +63,7 @@ pub fn scan_file(path: &str) -> Result<LazyFrame, String> {
 ///   CSV: counts newlines minus the header row (streaming, no data heap alloc).
 pub fn count_rows(lf: LazyFrame, path: &str) -> Result<usize, String> {
     match file_ext(path).as_str() {
-        "parquet" => {
-            let df = lf
-                .select([len().alias("_n")])
-                .collect()
-                .map_err(|e| e.to_string())?;
-            df.column("_n")
-                .map_err(|e| e.to_string())?
-                .get(0)
-                .map_err(|e| e.to_string())?
-                .try_extract::<usize>()
-                .map_err(|e| e.to_string())
-        }
+        "parquet" => count_lf(lf),
         _ => {
             use std::io::BufRead;
             let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
@@ -84,6 +73,20 @@ pub fn count_rows(lf: LazyFrame, path: &str) -> Result<usize, String> {
                 .saturating_sub(1))
         }
     }
+}
+
+/// Aggregate `len()` over a LazyFrame — used for both unfiltered parquet counts
+/// and filtered row counts where line-counting is not applicable.
+pub(crate) fn count_lf(lf: LazyFrame) -> Result<usize, String> {
+    lf.select([len().alias("_n")])
+        .collect()
+        .map_err(|e| e.to_string())?
+        .column("_n")
+        .map_err(|e| e.to_string())?
+        .get(0)
+        .map_err(|e| e.to_string())?
+        .try_extract::<usize>()
+        .map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -183,4 +186,121 @@ fn file_ext(path: &str) -> String {
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_lowercase()
+}
+
+// ---------------------------------------------------------------------------
+// Filtering
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct FilterSpec {
+    pub column: String,
+    pub op: String,
+    pub value: Option<String>,
+    pub value2: Option<String>,
+}
+
+/// AND-combine all filters and apply them to the LazyFrame.
+/// Returns the original LazyFrame unchanged when `filters` is empty.
+pub fn apply_filters(
+    lf: LazyFrame,
+    filters: &[FilterSpec],
+    schema: &[ColumnInfo],
+) -> Result<LazyFrame, String> {
+    if filters.is_empty() {
+        return Ok(lf);
+    }
+
+    let mut combined: Option<Expr> = None;
+    for spec in filters {
+        let dtype = schema
+            .iter()
+            .find(|c| c.name == spec.column)
+            .map(|c| c.dtype.as_str())
+            .ok_or_else(|| format!("Unknown column: {}", spec.column))?;
+        let expr = build_filter_expr(spec, dtype)?;
+        combined = Some(match combined {
+            None => expr,
+            Some(prev) => prev.and(expr),
+        });
+    }
+
+    Ok(lf.filter(combined.expect("loop ran at least once; combined is Some")))
+}
+
+fn build_filter_expr(spec: &FilterSpec, dtype: &str) -> Result<Expr, String> {
+    let c = spec.column.as_str();
+
+    // Null checks apply to all dtypes and need no value
+    match spec.op.as_str() {
+        "is_null" => return Ok(col(c).is_null()),
+        "is_not_null" => return Ok(col(c).is_not_null()),
+        "is_true" => return Ok(col(c).eq(lit(true))),
+        "is_false" => return Ok(col(c).eq(lit(false))),
+        _ => {}
+    }
+
+    let v = spec.value.as_deref().ok_or("Missing filter value")?;
+
+    match spec.op.as_str() {
+        "eq" => Ok(col(c).eq(parse_value(v, dtype)?)),
+        "neq" => Ok(col(c).neq(parse_value(v, dtype)?)),
+        "gt" => Ok(col(c).gt(parse_value(v, dtype)?)),
+        "gte" => Ok(col(c).gt_eq(parse_value(v, dtype)?)),
+        "lt" => Ok(col(c).lt(parse_value(v, dtype)?)),
+        "lte" => Ok(col(c).lt_eq(parse_value(v, dtype)?)),
+        "between" => {
+            let v2 = spec
+                .value2
+                .as_deref()
+                .ok_or("Missing second value for 'between'")?;
+            Ok(col(c)
+                .gt_eq(parse_value(v, dtype)?)
+                .and(col(c).lt_eq(parse_value(v2, dtype)?)))
+        }
+        "contains" => Ok(col(c).str().contains_literal(lit(v))),
+        "not_contains" => Ok(col(c).str().contains_literal(lit(v)).not()),
+        "starts_with" => Ok(col(c).str().starts_with(lit(v))),
+        "ends_with" => Ok(col(c).str().ends_with(lit(v))),
+        other => Err(format!("Unknown filter op: {other}")),
+    }
+}
+
+fn parse_value(v: &str, dtype: &str) -> Result<Expr, String> {
+    match dtype {
+        "integer" => {
+            let n = v
+                .parse::<i64>()
+                .map_err(|e| format!("Cannot parse '{v}' as integer: {e}"))?;
+            Ok(lit(n))
+        }
+        "float" => {
+            let f = v
+                .parse::<f64>()
+                .map_err(|e| format!("Cannot parse '{v}' as float: {e}"))?;
+            Ok(lit(f))
+        }
+        "date" => {
+            let date = chrono::NaiveDate::parse_from_str(v, "%Y-%m-%d")
+                .map_err(|e| format!("Cannot parse '{v}' as date (expected YYYY-MM-DD): {e}"))?;
+            let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+            let days = date.signed_duration_since(epoch).num_days() as i32;
+            Ok(lit(days).cast(DataType::Date))
+        }
+        "datetime" => {
+            let dt = chrono::NaiveDateTime::parse_from_str(v, "%Y-%m-%dT%H:%M:%S")
+                .map_err(|e| format!("Cannot parse '{v}' as datetime (expected YYYY-MM-DDTHH:MM:SS): {e}"))?;
+            let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
+                .unwrap()
+                .and_hms_opt(0, 0, 0)
+                .unwrap();
+            let us = dt
+                .signed_duration_since(epoch)
+                .num_microseconds()
+                .ok_or("Datetime overflow")?;
+            Ok(lit(us).cast(DataType::Datetime(TimeUnit::Microseconds, None)))
+        }
+        // string and everything else: literal string comparison
+        _ => Ok(lit(v)),
+    }
 }
