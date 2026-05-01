@@ -4,6 +4,7 @@ import { AgGridVue } from "ag-grid-vue3";
 import { ModuleRegistry, AllCommunityModule } from "ag-grid-community";
 import type {
   ColDef,
+  FirstDataRenderedEvent,
   GridApi,
   GridReadyEvent,
   IDatasource,
@@ -128,7 +129,6 @@ const columnDefs = computed<ColDef[]>(() =>
 const fileName = computed(() => fileInfo.value?.path.split(/[\\/]/).pop() ?? "");
 
 const defaultColDef: ColDef = {
-  flex: 1,
   minWidth: 80,
   sortable: true,
   resizable: true,
@@ -269,6 +269,10 @@ function onGridReady(event: GridReadyEvent) {
   }
 }
 
+function onFirstDataRendered(event: FirstDataRenderedEvent) {
+  event.api.autoSizeAllColumns();
+}
+
 // ---------------------------------------------------------------------------
 // File open
 // ---------------------------------------------------------------------------
@@ -383,6 +387,7 @@ async function openFile() {
         :maxBlocksInCache="20"
         :infiniteInitialRowCount="1"
         @grid-ready="onGridReady"
+        @first-data-rendered="onFirstDataRendered"
       />
     </template>
   </div>
