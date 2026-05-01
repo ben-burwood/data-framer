@@ -12,6 +12,17 @@ export default defineConfig(async () => ({
   //
   // 1. prevent vite from obscuring rust errors
   clearScreen: false,
+
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          "vendor-maplibre": ["maplibre-gl"],
+          "vendor-aggrid": ["ag-grid-community", "ag-grid-vue3"],
+        },
+      },
+    },
+  },
   // 2. tauri expects a fixed port, fail if that port is not available
   server: {
     port: 1420,

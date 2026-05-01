@@ -1,7 +1,14 @@
 <script setup lang="ts">
 import { ref, computed, watch } from "vue";
 import { AgGridVue } from "ag-grid-vue3";
-import { ModuleRegistry, AllCommunityModule, themeQuartz } from "ag-grid-community";
+import {
+  ModuleRegistry,
+  themeQuartz,
+  InfiniteRowModelModule,
+  ColumnAutoSizeModule,
+  ColumnApiModule,
+  ValidationModule,
+} from "ag-grid-community";
 import type {
   ColDef,
   FirstDataRenderedEvent,
@@ -13,7 +20,12 @@ import type {
 import { invoke } from "@tauri-apps/api/core";
 import type { ColumnInfo, FilterSpec, RowsResponse } from "../types";
 
-ModuleRegistry.registerModules([AllCommunityModule]);
+ModuleRegistry.registerModules([
+  InfiniteRowModelModule,
+  ColumnAutoSizeModule,
+  ColumnApiModule,
+  ValidationModule,
+]);
 
 const gridTheme = themeQuartz.withParams({
   headerBackgroundColor: "color-mix(in srgb, white, #2196f3 12%)",

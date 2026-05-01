@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from "vue";
+import { ref, computed, defineAsyncComponent } from "vue";
 import type { ColumnState, GridApi } from "ag-grid-community";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
@@ -7,7 +7,7 @@ import type { FileInfo, FilterSpec } from "./types";
 import FilterPanel from "./components/FilterPanel.vue";
 import SelectPanel from "./components/SelectPanel.vue";
 import DataGrid from "./components/DataGrid.vue";
-import MapView from "./components/MapView.vue";
+const MapView = defineAsyncComponent(() => import("./components/MapView.vue"));
 
 // ---------------------------------------------------------------------------
 // State
