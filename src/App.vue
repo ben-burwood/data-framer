@@ -1,160 +1,77 @@
 <script setup lang="ts">
 import { ref } from "vue";
-import { invoke } from "@tauri-apps/api/core";
+import { AgGridVue } from "ag-grid-vue3";
+import { ModuleRegistry, AllCommunityModule } from "ag-grid-community";
+import type { ColDef } from "ag-grid-community";
+import "ag-grid-community/styles/ag-grid.css";
+import "ag-grid-community/styles/ag-theme-quartz.css";
 
-const greetMsg = ref("");
-const name = ref("");
+ModuleRegistry.registerModules([AllCommunityModule]);
 
-async function greet() {
-  // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-  greetMsg.value = await invoke("greet", { name: name.value });
+interface RowData {
+  id: number;
+  name: string;
+  category: string;
+  value: number;
+  currency: string;
+  date: string;
+  status: string;
 }
+
+const columnDefs = ref<ColDef<RowData>[]>([
+  { field: "id", headerName: "ID", maxWidth: 80 },
+  { field: "name", headerName: "Name" },
+  { field: "category", headerName: "Category" },
+  { field: "value", headerName: "Value", valueFormatter: (p) => p.value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }) },
+  { field: "currency", headerName: "Currency", maxWidth: 110 },
+  { field: "date", headerName: "Date" },
+  { field: "status", headerName: "Status" },
+]);
+
+const defaultColDef = ref<ColDef>({
+  flex: 1,
+  sortable: true,
+  filter: true,
+  resizable: true,
+});
+
+const rowData = ref<RowData[]>([
+  { id: 1,  name: "AAPL US Equity",   category: "Equity",      value: 189.34,  currency: "USD", date: "2026-04-28", status: "Active"   },
+  { id: 2,  name: "MSFT US Equity",   category: "Equity",      value: 415.20,  currency: "USD", date: "2026-04-28", status: "Active"   },
+  { id: 3,  name: "TSLA US Equity",   category: "Equity",      value: 172.55,  currency: "USD", date: "2026-04-28", status: "Active"   },
+  { id: 4,  name: "US 10Y Treasury",  category: "Fixed Income", value: 98.67,  currency: "USD", date: "2026-04-25", status: "Settled"  },
+  { id: 5,  name: "EUR/USD FX Fwd",   category: "FX",          value: 1.0823,  currency: "EUR", date: "2026-05-01", status: "Pending"  },
+  { id: 6,  name: "Brent Crude Jul",  category: "Commodity",   value: 84.12,   currency: "USD", date: "2026-04-30", status: "Active"   },
+  { id: 7,  name: "Gold Spot",        category: "Commodity",   value: 2315.40, currency: "USD", date: "2026-04-28", status: "Active"   },
+  { id: 8,  name: "NVDA US Equity",   category: "Equity",      value: 887.60,  currency: "USD", date: "2026-04-28", status: "Active"   },
+  { id: 9,  name: "GBP/JPY FX Spot",  category: "FX",          value: 192.34,  currency: "GBP", date: "2026-04-29", status: "Settled"  },
+  { id: 10, name: "DE 5Y Bund",       category: "Fixed Income", value: 101.23, currency: "EUR", date: "2026-04-25", status: "Settled"  },
+]);
 </script>
 
 <template>
-  <main class="container">
-    <h1>Welcome to Tauri + Vue</h1>
-
-    <div class="row">
-      <a href="https://vitejs.dev" target="_blank">
-        <img src="/vite.svg" class="logo vite" alt="Vite logo" />
-      </a>
-      <a href="https://tauri.app" target="_blank">
-        <img src="/tauri.svg" class="logo tauri" alt="Tauri logo" />
-      </a>
-      <a href="https://vuejs.org/" target="_blank">
-        <img src="./assets/vue.svg" class="logo vue" alt="Vue logo" />
-      </a>
-    </div>
-    <p>Click on the Tauri, Vite, and Vue logos to learn more.</p>
-
-    <form class="row" @submit.prevent="greet">
-      <input id="greet-input" v-model="name" placeholder="Enter a name..." />
-      <button type="submit">Greet</button>
-    </form>
-    <p>{{ greetMsg }}</p>
-  </main>
+  <AgGridVue
+    class="ag-theme-quartz"
+    :columnDefs="columnDefs"
+    :rowData="rowData"
+    :defaultColDef="defaultColDef"
+  />
 </template>
 
-<style scoped>
-.logo.vite:hover {
-  filter: drop-shadow(0 0 2em #747bff);
-}
-
-.logo.vue:hover {
-  filter: drop-shadow(0 0 2em #249b73);
-}
-
-</style>
 <style>
-:root {
-  font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
-  font-size: 16px;
-  line-height: 24px;
-  font-weight: 400;
-
-  color: #0f0f0f;
-  background-color: #f6f6f6;
-
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  -webkit-text-size-adjust: 100%;
+*, *::before, *::after {
+  box-sizing: border-box;
 }
 
-.container {
+html, body, #app {
+  height: 100%;
   margin: 0;
-  padding-top: 10vh;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  text-align: center;
+  padding: 0;
+  overflow: hidden;
 }
 
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: 0.75s;
+.ag-theme-quartz {
+  width: 100%;
+  height: 100%;
 }
-
-.logo.tauri:hover {
-  filter: drop-shadow(0 0 2em #24c8db);
-}
-
-.row {
-  display: flex;
-  justify-content: center;
-}
-
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
-}
-
-a:hover {
-  color: #535bf2;
-}
-
-h1 {
-  text-align: center;
-}
-
-input,
-button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
-  font-family: inherit;
-  color: #0f0f0f;
-  background-color: #ffffff;
-  transition: border-color 0.25s;
-  box-shadow: 0 2px 2px rgba(0, 0, 0, 0.2);
-}
-
-button {
-  cursor: pointer;
-}
-
-button:hover {
-  border-color: #396cd8;
-}
-button:active {
-  border-color: #396cd8;
-  background-color: #e8e8e8;
-}
-
-input,
-button {
-  outline: none;
-}
-
-#greet-input {
-  margin-right: 5px;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    color: #f6f6f6;
-    background-color: #2f2f2f;
-  }
-
-  a:hover {
-    color: #24c8db;
-  }
-
-  input,
-  button {
-    color: #ffffff;
-    background-color: #0f0f0f98;
-  }
-  button:active {
-    background-color: #0f0f0f69;
-  }
-}
-
 </style>
