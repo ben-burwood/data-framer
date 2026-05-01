@@ -123,10 +123,28 @@ const pendingFilters = ref<FilterSpec[]>([]);
 const activeFilters = ref<FilterSpec[]>([]);
 const filteredRowCount = ref(0);
 
-const columnDefs = computed<ColDef[]>(() =>
-  fileInfo.value ? schemaToColDefs(fileInfo.value.columns) : []
+const showColumns             = ref(false);
+const pendingColumnVisibility = ref<Record<string, boolean>>({});
+const activeColumnVisibility  = ref<Record<string, boolean>>({});
+
+const visibleColumns = computed(() =>
+  fileInfo.value?.columns.filter(c => activeColumnVisibility.value[c.name] !== false) ?? []
 );
+
+const columnDefs = computed<ColDef[]>(() => schemaToColDefs(visibleColumns.value));
+
 const fileName = computed(() => fileInfo.value?.path.split(/[\\/]/).pop() ?? "");
+
+// Empty array = all columns; backend skips the .select() call entirely.
+const selectedColumnNames = computed(() => {
+  if (!fileInfo.value) return [];
+  const visible = visibleColumns.value.map(c => c.name);
+  return visible.length < fileInfo.value.columns.length ? visible : [];
+});
+
+const hiddenColumnCount = computed(() =>
+  (fileInfo.value?.columns.length ?? 0) - visibleColumns.value.length
+);
 
 const defaultColDef: ColDef = {
   minWidth: 80,
@@ -222,6 +240,53 @@ function clearFilters() {
 }
 
 // ---------------------------------------------------------------------------
+// Column visibility helpers
+// ---------------------------------------------------------------------------
+function initColumnVisibility(cols: ColumnInfo[]) {
+  const vis: Record<string, boolean> = {};
+  for (const c of cols) vis[c.name] = true;
+  pendingColumnVisibility.value = vis;           // direct ownership
+  activeColumnVisibility.value  = { ...vis };    // independent copy
+}
+
+function togglePendingColumn(name: string) {
+  pendingColumnVisibility.value[name] = !pendingColumnVisibility.value[name];
+}
+
+function selectAllColumns() {
+  pendingColumnVisibility.value = Object.fromEntries(
+    fileInfo.value!.columns.map(c => [c.name, true])
+  );
+}
+
+function deselectAllColumns() {
+  pendingColumnVisibility.value = Object.fromEntries(
+    fileInfo.value!.columns.map(c => [c.name, false])
+  );
+}
+
+function applyColumns() {
+  const anyVisible = fileInfo.value?.columns.some(
+    c => pendingColumnVisibility.value[c.name] !== false
+  );
+  if (!anyVisible) { alert("At least one column must be visible."); return; }
+  const changed = fileInfo.value!.columns.some(
+    c => pendingColumnVisibility.value[c.name] !== activeColumnVisibility.value[c.name]
+  );
+  if (!changed) return;
+  activeColumnVisibility.value = { ...pendingColumnVisibility.value };
+  gridApi.value?.purgeInfiniteCache();
+}
+
+function resetColumns() {
+  const alreadyDefault = fileInfo.value!.columns.every(
+    c => activeColumnVisibility.value[c.name] !== false
+  );
+  initColumnVisibility(fileInfo.value!.columns);
+  if (!alreadyDefault) gridApi.value?.purgeInfiniteCache();
+}
+
+// ---------------------------------------------------------------------------
 // Grid helpers
 // ---------------------------------------------------------------------------
 function schemaToColDefs(columns: ColumnInfo[]): ColDef[] {
@@ -244,6 +309,7 @@ function buildDatasource(): IDatasource {
         sortCol: sortModel[0]?.colId ?? null,
         sortDesc: sortModel[0]?.sort === "desc",
         filters: activeFilters.value,
+        columns: selectedColumnNames.value,
       })
         .then((r) => {
           if (filteredRowCount.value !== r.total_rows) {
@@ -290,10 +356,12 @@ async function openFile() {
   pendingFilters.value = [];
   activeFilters.value = [];
   filteredRowCount.value = 0;
+  showColumns.value = false;
 
   try {
     const info = await invoke<FileInfo>("load_file", { path });
     fileInfo.value = info;
+    initColumnVisibility(info.columns);
     view.value = "loaded";
   } catch (err) {
     view.value = "empty";
@@ -337,6 +405,13 @@ async function openFile() {
         >
           Filters<span v-if="activeFilters.length > 0" class="badge">{{ activeFilters.length }}</span>
         </button>
+        <button
+          class="toolbar-btn columns-btn"
+          :class="{ active: showColumns }"
+          @click="showColumns = !showColumns"
+        >
+          Columns<span v-if="hiddenColumnCount > 0" class="badge">{{ hiddenColumnCount }}</span>
+        </button>
         <button class="toolbar-btn" @click="openFile">Open File</button>
       </div>
 
@@ -374,6 +449,31 @@ async function openFile() {
           <div class="filter-action-btns">
             <button class="clear-btn" @click="clearFilters">Clear All</button>
             <button class="apply-btn" @click="applyFilters">Apply</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Column panel -->
+      <div v-if="showColumns" class="column-panel">
+        <div class="column-list">
+          <label v-for="col in fileInfo!.columns" :key="col.name" class="column-item">
+            <input
+              type="checkbox"
+              :checked="pendingColumnVisibility[col.name] !== false"
+              @change="togglePendingColumn(col.name)"
+            />
+            <span class="col-item-name">{{ col.name }}</span>
+            <span class="col-dtype-badge">{{ col.dtype }}</span>
+          </label>
+        </div>
+        <div class="column-actions">
+          <div class="filter-action-btns">
+            <button class="add-filter-btn" @click="selectAllColumns">Select All</button>
+            <button class="clear-btn" @click="deselectAllColumns">Deselect All</button>
+          </div>
+          <div class="filter-action-btns">
+            <button class="clear-btn" @click="resetColumns">Reset</button>
+            <button class="apply-btn" @click="applyColumns">Apply</button>
           </div>
         </div>
       </div>
@@ -501,7 +601,8 @@ button:disabled {
   margin-left: auto;
 }
 
-.filters-btn {
+.filters-btn,
+.columns-btn {
   background: transparent;
   color: #444;
   border: 1px solid #d0d0d0;
@@ -510,11 +611,13 @@ button:disabled {
   gap: 5px;
 }
 
-.filters-btn:hover:not(:disabled) {
+.filters-btn:hover:not(:disabled),
+.columns-btn:hover:not(:disabled) {
   background: #f0f0f0;
 }
 
-.filters-btn.active {
+.filters-btn.active,
+.columns-btn.active {
   background: #efefff;
   color: #646cff;
   border-color: #646cff;
@@ -640,6 +743,57 @@ button:disabled {
 
 .apply-btn:hover:not(:disabled) {
   background: #535bf2;
+}
+
+/* ---- Column panel ---- */
+.column-panel {
+  padding: 8px 14px 4px;
+  background: #fafafa;
+  border-bottom: 1px solid #e0e0e0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.column-list {
+  max-height: 240px;
+  overflow-y: auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 24px;
+}
+
+.column-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.82rem;
+  cursor: pointer;
+  min-width: 160px;
+}
+
+.col-item-name {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.col-dtype-badge {
+  font-size: 0.7rem;
+  color: #888;
+  background: #f0f0f0;
+  border-radius: 4px;
+  padding: 1px 5px;
+  white-space: nowrap;
+}
+
+.column-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 0 6px;
 }
 
 /* ---- Grid ---- */

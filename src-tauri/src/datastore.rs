@@ -266,6 +266,20 @@ fn build_filter_expr(spec: &FilterSpec, dtype: &str) -> Result<Expr, String> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Column selection
+// ---------------------------------------------------------------------------
+
+/// Project the LazyFrame to only the requested columns.
+/// Empty slice = no-op (all columns pass through).
+/// Call after sort so a hidden sort column doesn't cause an error.
+pub fn apply_column_select(lf: LazyFrame, columns: &[String]) -> LazyFrame {
+    if columns.is_empty() {
+        return lf;
+    }
+    lf.select(columns.iter().map(|c| col(c.as_str())).collect::<Vec<_>>())
+}
+
 fn parse_value(v: &str, dtype: &str) -> Result<Expr, String> {
     match dtype {
         "integer" => {

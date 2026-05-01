@@ -30,8 +30,8 @@ fn load_file(path: String, state: State<'_, AppState>) -> Result<FileInfo, Strin
     })
 }
 
-/// Return a paginated, optionally sorted, optionally filtered slice of the loaded file.
-/// Only `limit` rows are collected and sent over IPC.
+/// Return a paginated, optionally sorted, optionally filtered, optionally column-projected
+/// slice of the loaded file. Only `limit` rows are collected and sent over IPC.
 #[tauri::command]
 fn get_rows(
     offset: i64,
@@ -39,6 +39,7 @@ fn get_rows(
     sort_col: Option<String>,
     sort_desc: bool,
     filters: Vec<datastore::FilterSpec>,
+    columns: Vec<String>,
     state: State<'_, AppState>,
 ) -> Result<RowsResponse, String> {
     let (file_path, unfiltered_rows, schema) = {
@@ -65,6 +66,8 @@ fn get_rows(
     } else {
         lf
     };
+
+    let lf = datastore::apply_column_select(lf, &columns);
 
     let df = lf
         .slice(offset, limit as u32)
