@@ -1,117 +1,13 @@
 <script setup lang="ts">
-import { ref, computed, watch, nextTick } from "vue";
-import { AgGridVue } from "ag-grid-vue3";
-import { ModuleRegistry, AllCommunityModule } from "ag-grid-community";
-import type {
-  ColDef,
-  ColumnState,
-  FirstDataRenderedEvent,
-  GridApi,
-  GridReadyEvent,
-  IDatasource,
-  IGetRowsParams,
-} from "ag-grid-community";
+import { ref, computed } from "vue";
+import type { ColumnState, GridApi } from "ag-grid-community";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
-import "ag-grid-community/styles/ag-grid.css";
-import "ag-grid-community/styles/ag-theme-quartz.css";
-import maplibregl from "maplibre-gl";
-import "maplibre-gl/dist/maplibre-gl.css";
-
-ModuleRegistry.registerModules([AllCommunityModule]);
-
-// ---------------------------------------------------------------------------
-// Types mirroring the Rust structs
-// ---------------------------------------------------------------------------
-type Dtype = "integer" | "float" | "boolean" | "date" | "datetime" | "string";
-
-interface ColumnInfo {
-  name: string;
-  dtype: Dtype;
-}
-
-interface FileInfo {
-  path: string;
-  total_rows: number;
-  columns: ColumnInfo[];
-}
-
-interface RowsResponse {
-  rows: Record<string, unknown>[];
-  total_rows: number;
-}
-
-// ---------------------------------------------------------------------------
-// Filter types
-// ---------------------------------------------------------------------------
-type FilterOp =
-  | "eq" | "neq"
-  | "gt" | "gte" | "lt" | "lte" | "between"
-  | "contains" | "not_contains" | "starts_with" | "ends_with"
-  | "is_true" | "is_false"
-  | "is_null" | "is_not_null";
-
-interface FilterSpec {
-  column: string;
-  op: FilterOp;
-  value: string;
-  value2: string;
-}
-
-interface OpDef {
-  label: string;
-  op: FilterOp;
-  hasValue: boolean;
-  hasTwoValues: boolean;
-}
-
-const NULL_OPS: OpDef[] = [
-  { label: "is null",     op: "is_null",     hasValue: false, hasTwoValues: false },
-  { label: "is not null", op: "is_not_null", hasValue: false, hasTwoValues: false },
-];
-
-const NUMERIC_OPS: OpDef[] = [
-  { label: "equals",                op: "eq",      hasValue: true,  hasTwoValues: false },
-  { label: "not equals",            op: "neq",     hasValue: true,  hasTwoValues: false },
-  { label: "greater than",          op: "gt",      hasValue: true,  hasTwoValues: false },
-  { label: "greater than or equal", op: "gte",     hasValue: true,  hasTwoValues: false },
-  { label: "less than",             op: "lt",      hasValue: true,  hasTwoValues: false },
-  { label: "less than or equal",    op: "lte",     hasValue: true,  hasTwoValues: false },
-  { label: "between",               op: "between", hasValue: true,  hasTwoValues: true  },
-  ...NULL_OPS,
-];
-
-const DATE_OPS: OpDef[] = [
-  { label: "equals",       op: "eq",      hasValue: true,  hasTwoValues: false },
-  { label: "not equals",   op: "neq",     hasValue: true,  hasTwoValues: false },
-  { label: "after",        op: "gt",      hasValue: true,  hasTwoValues: false },
-  { label: "after or on",  op: "gte",     hasValue: true,  hasTwoValues: false },
-  { label: "before",       op: "lt",      hasValue: true,  hasTwoValues: false },
-  { label: "before or on", op: "lte",     hasValue: true,  hasTwoValues: false },
-  { label: "between",      op: "between", hasValue: true,  hasTwoValues: true  },
-  ...NULL_OPS,
-];
-
-const OPS_BY_DTYPE: Record<Dtype, OpDef[]> = {
-  string: [
-    { label: "equals",       op: "eq",          hasValue: true,  hasTwoValues: false },
-    { label: "not equals",   op: "neq",         hasValue: true,  hasTwoValues: false },
-    { label: "contains",     op: "contains",    hasValue: true,  hasTwoValues: false },
-    { label: "not contains", op: "not_contains",hasValue: true,  hasTwoValues: false },
-    { label: "starts with",  op: "starts_with", hasValue: true,  hasTwoValues: false },
-    { label: "ends with",    op: "ends_with",   hasValue: true,  hasTwoValues: false },
-    ...NULL_OPS,
-  ],
-  integer:  NUMERIC_OPS,
-  float:    NUMERIC_OPS,
-  boolean: [
-    { label: "is true",  op: "is_true",  hasValue: false, hasTwoValues: false },
-    { label: "is false", op: "is_false", hasValue: false, hasTwoValues: false },
-    ...NULL_OPS,
-  ],
-  date:     DATE_OPS,
-  datetime: DATE_OPS,
-};
+import type { FileInfo, FilterSpec } from "./types";
+import FilterPanel from "./components/FilterPanel.vue";
+import SelectPanel from "./components/SelectPanel.vue";
+import DataGrid from "./components/DataGrid.vue";
+import MapView from "./components/MapView.vue";
 
 // ---------------------------------------------------------------------------
 // State
@@ -120,408 +16,70 @@ type ViewState = "empty" | "loading" | "loaded";
 
 const view = ref<ViewState>("empty");
 const fileInfo = ref<FileInfo | null>(null);
-const gridApi = ref<GridApi | null>(null);
-const showFilters = ref(false);
-const pendingFilters = ref<FilterSpec[]>([]);
 const activeFilters = ref<FilterSpec[]>([]);
+const activeColumnVisibility = ref<Record<string, boolean>>({});
+const currentView = ref<"table" | "map">("table");
+const exportState = ref<"idle" | "exporting">("idle");
 const filteredRowCount = ref(0);
-
-const exportState   = ref<"idle" | "exporting">("idle");
-const pendingFetches = ref(0);
-const isFetching     = computed(() => pendingFetches.value > 0);
-
-const showColumns             = ref(false);
-const pendingColumnVisibility = ref<Record<string, boolean>>({});
-const activeColumnVisibility  = ref<Record<string, boolean>>({});
-
-const visibleColumns = computed(() =>
-  fileInfo.value?.columns.filter(c => activeColumnVisibility.value[c.name] !== false) ?? []
-);
-
-const columnDefs = computed<ColDef[]>(() => schemaToColDefs(visibleColumns.value));
-
-const fileName = computed(() => fileInfo.value?.path.split(/[\\/]/).pop() ?? "");
-
-// Empty array = all columns; backend skips the .select() call entirely.
-const selectedColumnNames = computed(() => {
-  if (!fileInfo.value) return [];
-  const visible = visibleColumns.value.map(c => c.name);
-  return visible.length < fileInfo.value.columns.length ? visible : [];
-});
-
-const hiddenColumnCount = computed(() =>
-  (fileInfo.value?.columns.length ?? 0) - visibleColumns.value.length
-);
+const gridApi = ref<GridApi | null>(null);
+const filterPanelOpen = ref(false);
+const columnPanelOpen = ref(false);
 
 // ---------------------------------------------------------------------------
-// Map state
+// Computed
 // ---------------------------------------------------------------------------
 const LAT_NAMES = ["lat", "latitude"];
 const LON_NAMES = ["lon", "lng", "longitude"];
 
-const currentView = ref<"table" | "map">("table");
+const fileName = computed(() => fileInfo.value?.path.split(/[\\/]/).pop() ?? "");
+
 const latColumn = computed(() =>
   fileInfo.value?.columns.find(c => LAT_NAMES.includes(c.name.toLowerCase()))?.name ?? null
 );
 const lonColumn = computed(() =>
   fileInfo.value?.columns.find(c => LON_NAMES.includes(c.name.toLowerCase()))?.name ?? null
 );
-const mapContainer = ref<HTMLElement | null>(null);
-const mapInstance = ref<maplibregl.Map | null>(null);
-const mapLoading = ref(false);
-const mapReady = ref(false);
-let suppressMoveHandler = false;
-
 const hasGeoColumns = computed(() => !!latColumn.value && !!lonColumn.value);
 
-const defaultColDef: ColDef = {
-  minWidth: 80,
-  sortable: true,
-  resizable: true,
-};
-
-// ---------------------------------------------------------------------------
-// Filter helpers
-// ---------------------------------------------------------------------------
-function opDefsForFilter(f: FilterSpec): OpDef[] {
-  const col = fileInfo.value?.columns.find((c) => c.name === f.column);
-  return col ? OPS_BY_DTYPE[col.dtype] : [];
-}
-
-function currentOpDef(f: FilterSpec): OpDef | undefined {
-  return opDefsForFilter(f).find((d) => d.op === f.op);
-}
-
-function onColumnChange(f: FilterSpec) {
-  const defs = opDefsForFilter(f);
-  if (defs.length > 0) {
-    f.op = defs[0].op;
-    f.value = "";
-    f.value2 = "";
-  }
-}
-
-function inputTypeForFilter(f: FilterSpec): string {
-  const col = fileInfo.value?.columns.find((c) => c.name === f.column);
-  switch (col?.dtype) {
-    case "integer":
-    case "float":    return "number";
-    case "date":     return "date";
-    case "datetime": return "datetime-local";
-    default:         return "text";
-  }
-}
-
-function addFilter() {
-  const firstCol = fileInfo.value?.columns[0];
-  if (!firstCol) return;
-  pendingFilters.value.push({
-    column: firstCol.name,
-    op: OPS_BY_DTYPE[firstCol.dtype][0].op,
-    value: "",
-    value2: "",
-  });
-}
-
-function removeFilter(idx: number) {
-  pendingFilters.value.splice(idx, 1);
-}
-
-// datetime-local inputs give "YYYY-MM-DDTHH:MM" but the backend needs seconds.
-function normalizeDateTime(value: string): string {
-  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value) ? value + ":00" : value;
-}
-
-function applyFilters() {
-  // Validate: all filters with a value input must have a non-empty value.
-  for (const f of pendingFilters.value) {
-    const def = currentOpDef(f);
-    if (!def) continue;
-    // String() coercion needed: <input type="number"> v-model returns a JS number, not a string.
-    if ((def.hasValue && !String(f.value ?? "").trim()) || (def.hasTwoValues && !String(f.value2 ?? "").trim())) {
-      alert("Please fill in all filter values before applying.");
-      return;
-    }
-  }
-
-  activeFilters.value = pendingFilters.value.map((f) => {
-    const dtype = fileInfo.value?.columns.find((c) => c.name === f.column)?.dtype ?? "string";
-    // Stringify: number inputs yield JS numbers; Rust FilterSpec expects strings.
-    const val  = String(f.value  ?? "");
-    const val2 = String(f.value2 ?? "");
-    const isDatetime = dtype === "datetime";
-    return {
-      ...f,
-      value:  isDatetime ? normalizeDateTime(val)  : val,
-      value2: isDatetime ? normalizeDateTime(val2) : val2,
-    };
-  });
-
-  gridApi.value?.purgeInfiniteCache();
-}
-
-function clearFilters() {
-  pendingFilters.value = [];
-  activeFilters.value = [];
-  filteredRowCount.value = 0;
-  gridApi.value?.purgeInfiniteCache();
-}
-
-// ---------------------------------------------------------------------------
-// Column visibility helpers
-// ---------------------------------------------------------------------------
-function initColumnVisibility(cols: ColumnInfo[]) {
-  const vis: Record<string, boolean> = {};
-  for (const c of cols) vis[c.name] = true;
-  pendingColumnVisibility.value = vis;           // direct ownership
-  activeColumnVisibility.value  = { ...vis };    // independent copy
-}
-
-function togglePendingColumn(name: string) {
-  pendingColumnVisibility.value[name] = !pendingColumnVisibility.value[name];
-}
-
-function selectAllColumns() {
-  pendingColumnVisibility.value = Object.fromEntries(
-    fileInfo.value!.columns.map(c => [c.name, true])
-  );
-}
-
-function deselectAllColumns() {
-  pendingColumnVisibility.value = Object.fromEntries(
-    fileInfo.value!.columns.map(c => [c.name, false])
-  );
-}
-
-function applyColumns() {
-  const anyVisible = fileInfo.value?.columns.some(
-    c => pendingColumnVisibility.value[c.name] !== false
-  );
-  if (!anyVisible) { alert("At least one column must be visible."); return; }
-  const changed = fileInfo.value!.columns.some(
-    c => pendingColumnVisibility.value[c.name] !== activeColumnVisibility.value[c.name]
-  );
-  if (!changed) return;
-  activeColumnVisibility.value = { ...pendingColumnVisibility.value };
-  gridApi.value?.purgeInfiniteCache();
-}
-
-function resetColumns() {
-  const alreadyDefault = fileInfo.value!.columns.every(
-    c => activeColumnVisibility.value[c.name] !== false
-  );
-  initColumnVisibility(fileInfo.value!.columns);
-  if (!alreadyDefault) gridApi.value?.purgeInfiniteCache();
-}
-
-// ---------------------------------------------------------------------------
-// Grid helpers
-// ---------------------------------------------------------------------------
-function schemaToColDefs(columns: ColumnInfo[]): ColDef[] {
-  return columns.map((c) => ({
-    field: c.name,
-    headerName: c.name,
-    ...(c.dtype === "integer" || c.dtype === "float"
-      ? { type: "numericColumn" }
-      : {}),
-  }));
-}
-
-function buildDatasource(): IDatasource {
-  return {
-    async getRows(params: IGetRowsParams) {
-      const { startRow, endRow, sortModel } = params;
-      pendingFetches.value++;
-      try {
-        const r = await invoke<RowsResponse>("get_rows", {
-          offset: startRow,
-          limit: endRow - startRow,
-          sortCol: sortModel[0]?.colId ?? null,
-          sortDesc: sortModel[0]?.sort === "desc",
-          filters: activeFilters.value,
-          columns: selectedColumnNames.value,
-        });
-        if (filteredRowCount.value !== r.total_rows) {
-          filteredRowCount.value = r.total_rows;
-        }
-        params.successCallback(r.rows, r.total_rows);
-      } catch (err) {
-        console.error("get_rows failed:", err);
-        params.failCallback();
-      } finally {
-        pendingFetches.value--;
-      }
-    },
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Grid events
-// ---------------------------------------------------------------------------
-function onGridReady(event: GridReadyEvent) {
-  gridApi.value = event.api;
-  if (fileInfo.value) {
-    event.api.setGridOption("datasource", buildDatasource());
-  }
-}
-
-function onFirstDataRendered(event: FirstDataRenderedEvent) {
-  event.api.autoSizeAllColumns();
-}
+const hiddenColumnCount = computed(() => {
+  if (!fileInfo.value) return 0;
+  return fileInfo.value.columns.filter(c => activeColumnVisibility.value[c.name] === false).length;
+});
 
 // ---------------------------------------------------------------------------
 // File open
 // ---------------------------------------------------------------------------
+function initColumnVisibility() {
+  const vis: Record<string, boolean> = {};
+  for (const c of fileInfo.value!.columns) vis[c.name] = true;
+  activeColumnVisibility.value = vis;
+}
+
 async function openFile() {
   const path = (await open({
     multiple: false,
     filters: [{ name: "Data Files", extensions: ["parquet", "csv"] }],
   })) as string | null;
-
   if (!path) return;
 
   view.value = "loading";
   gridApi.value = null;
-  showFilters.value = false;
-  pendingFilters.value = [];
+  filterPanelOpen.value = false;
   activeFilters.value = [];
   filteredRowCount.value = 0;
-  showColumns.value = false;
+  columnPanelOpen.value = false;
 
   try {
     const info = await invoke<FileInfo>("load_file", { path });
     fileInfo.value = info;
-    initColumnVisibility(info.columns);
-
+    initColumnVisibility();
     currentView.value = "table";
-    mapReady.value = false;
-    mapInstance.value?.remove();
-    mapInstance.value = null;
-
     view.value = "loaded";
   } catch (err) {
     view.value = "empty";
     alert(`Failed to load file:\n${err}`);
   }
 }
-
-// ---------------------------------------------------------------------------
-// Map
-// ---------------------------------------------------------------------------
-async function switchView(view: "table" | "map") {
-  currentView.value = view;
-  if (view === "map") {
-    await nextTick();
-    if (!mapInstance.value) {
-      initMap();
-    } else if (mapReady.value) {
-      await loadMapPoints();
-    }
-  }
-}
-
-function initMap() {
-  if (!mapContainer.value) return;
-  mapInstance.value = new maplibregl.Map({
-    container: mapContainer.value,
-    style: {
-      version: 8,
-      sources: {
-        osm: {
-          type: "raster",
-          tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
-          tileSize: 256,
-          attribution: "© OpenStreetMap contributors",
-        },
-      },
-      layers: [{ id: "osm", type: "raster", source: "osm" }],
-    },
-    center: [-2.5, 54.5],
-    zoom: 5,
-  });
-
-  mapInstance.value.on("load", async () => {
-    mapInstance.value!.addSource("points", {
-      type: "geojson",
-      data: { type: "FeatureCollection", features: [] },
-    });
-    mapInstance.value!.addLayer({
-      id: "points",
-      type: "circle",
-      source: "points",
-      paint: {
-        "circle-radius": 5,
-        "circle-color": "#646cff",
-        "circle-opacity": 0.7,
-      },
-    });
-    mapReady.value = true;
-    await loadMapPoints(true);
-  });
-
-  let moveTimer: ReturnType<typeof setTimeout> | null = null;
-  mapInstance.value.on("moveend", () => {
-    if (suppressMoveHandler) return;
-    if (moveTimer) clearTimeout(moveTimer);
-    moveTimer = setTimeout(() => loadMapPoints(), 300);
-  });
-}
-
-// fit=true: no bbox, then fit map to data extent; fit=false: use current viewport bounds
-async function loadMapPoints(fit = false) {
-  if (!latColumn.value || !lonColumn.value) return;
-  const bounds = fit ? null : mapInstance.value?.getBounds();
-  mapLoading.value = true;
-  try {
-    const points = await invoke<[number, number][]>("get_map_points", {
-      latCol: latColumn.value,
-      lonCol: lonColumn.value,
-      filters: activeFilters.value,
-      minLat: bounds?.getSouth() ?? null,
-      maxLat: bounds?.getNorth() ?? null,
-      minLon: bounds?.getWest() ?? null,
-      maxLon: bounds?.getEast() ?? null,
-    });
-    setMapPoints(points);
-    if (fit && points.length > 0) fitMapToBounds(points);
-  } finally {
-    mapLoading.value = false;
-  }
-}
-
-function setMapPoints(points: [number, number][]) {
-  const source = mapInstance.value?.getSource("points") as maplibregl.GeoJSONSource | undefined;
-  source?.setData({
-    type: "FeatureCollection",
-    features: points.map(([lat, lon]) => ({
-      type: "Feature",
-      geometry: { type: "Point", coordinates: [lon, lat] },
-      properties: {},
-    })),
-  });
-}
-
-function fitMapToBounds(points: [number, number][]) {
-  let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
-  for (const [lat, lon] of points) {
-    if (lat < minLat) minLat = lat;
-    if (lat > maxLat) maxLat = lat;
-    if (lon < minLon) minLon = lon;
-    if (lon > maxLon) maxLon = lon;
-  }
-  suppressMoveHandler = true;
-  mapInstance.value!.once("moveend", () => { suppressMoveHandler = false; });
-  mapInstance.value!.fitBounds(
-    [[minLon, minLat], [maxLon, maxLat]],
-    { padding: 40, duration: 500 },
-  );
-}
-
-watch(activeFilters, () => {
-  if (currentView.value === "map" && mapReady.value) {
-    loadMapPoints(true);
-  }
-});
 
 // ---------------------------------------------------------------------------
 // Export
@@ -538,6 +96,10 @@ async function exportFile() {
   const sortedCol = (gridApi.value?.getColumnState() as ColumnState[] ?? [])
     .find(c => c.sort != null);
 
+  const allCols = fileInfo.value!.columns;
+  const visible = allCols.filter(c => activeColumnVisibility.value[c.name] !== false);
+  const columns = visible.length < allCols.length ? visible.map(c => c.name) : [];
+
   exportState.value = "exporting";
   try {
     await invoke("export_file", {
@@ -545,13 +107,29 @@ async function exportFile() {
       sortCol:  sortedCol?.colId  ?? null,
       sortDesc: sortedCol?.sort === "desc",
       filters:  activeFilters.value,
-      columns:  selectedColumnNames.value,
+      columns,
     });
   } catch (err) {
     alert(`Export failed:\n${err}`);
   } finally {
     exportState.value = "idle";
   }
+}
+
+// ---------------------------------------------------------------------------
+// Filter / column event handlers
+// ---------------------------------------------------------------------------
+function onFiltersApply(filters: FilterSpec[]) {
+  activeFilters.value = filters;
+}
+
+function onFiltersClear() {
+  activeFilters.value = [];
+  filteredRowCount.value = 0;
+}
+
+function onColumnsReset() {
+  initColumnVisibility();
 }
 </script>
 
@@ -585,21 +163,21 @@ async function exportFile() {
         </span>
         <button
           class="toolbar-btn filters-btn"
-          :class="{ active: showFilters }"
-          @click="showFilters = !showFilters"
+          :class="{ active: filterPanelOpen }"
+          @click="filterPanelOpen = !filterPanelOpen"
         >
           Filters<span v-if="activeFilters.length > 0" class="badge">{{ activeFilters.length }}</span>
         </button>
         <button
           class="toolbar-btn columns-btn"
-          :class="{ active: showColumns }"
-          @click="showColumns = !showColumns"
+          :class="{ active: columnPanelOpen }"
+          @click="columnPanelOpen = !columnPanelOpen"
         >
           Columns<span v-if="hiddenColumnCount > 0" class="badge">{{ hiddenColumnCount }}</span>
         </button>
         <div v-if="hasGeoColumns" class="view-toggle">
-          <button :class="{ active: currentView === 'table' }" @click="switchView('table')">Table</button>
-          <button :class="{ active: currentView === 'map' }" @click="switchView('map')">Map</button>
+          <button :class="{ active: currentView === 'table' }" @click="currentView = 'table'">Table</button>
+          <button :class="{ active: currentView === 'map' }" @click="currentView = 'map'">Map</button>
         </div>
         <button
           class="toolbar-btn"
@@ -609,85 +187,35 @@ async function exportFile() {
         <button class="toolbar-btn" @click="openFile">Open File</button>
       </div>
 
-      <!-- Filter panel -->
-      <div v-if="showFilters" class="filter-panel">
-        <div v-for="(f, i) in pendingFilters" :key="`${i}_${f.column}`" class="filter-row">
-          <select v-model="f.column" @change="onColumnChange(f)" class="filter-select">
-            <option v-for="col in fileInfo!.columns" :key="col.name" :value="col.name">
-              {{ col.name }}
-            </option>
-          </select>
-          <select v-model="f.op" class="filter-select op-select">
-            <option v-for="def in opDefsForFilter(f)" :key="def.op" :value="def.op">
-              {{ def.label }}
-            </option>
-          </select>
-          <input
-            v-if="currentOpDef(f)?.hasValue"
-            v-model="f.value"
-            :type="inputTypeForFilter(f)"
-            class="filter-value"
-            placeholder="value"
-          />
-          <input
-            v-if="currentOpDef(f)?.hasTwoValues"
-            v-model="f.value2"
-            :type="inputTypeForFilter(f)"
-            class="filter-value"
-            placeholder="to"
-          />
-          <button class="remove-btn" @click="removeFilter(i)" title="Remove filter">×</button>
-        </div>
-        <div class="filter-actions">
-          <button class="add-filter-btn" @click="addFilter">+ Add Filter</button>
-          <div class="filter-action-btns">
-            <button class="clear-btn" @click="clearFilters">Clear All</button>
-            <button class="apply-btn" @click="applyFilters">Apply</button>
-          </div>
-        </div>
-      </div>
-
-      <!-- Column panel -->
-      <div v-if="showColumns" class="column-panel">
-        <div class="column-list">
-          <label v-for="col in fileInfo!.columns" :key="col.name" class="column-item">
-            <input
-              type="checkbox"
-              :checked="pendingColumnVisibility[col.name] !== false"
-              @change="togglePendingColumn(col.name)"
-            />
-            <span class="col-item-name">{{ col.name }}</span>
-            <span class="col-dtype-badge">{{ col.dtype }}</span>
-          </label>
-        </div>
-        <div class="column-actions">
-          <div class="filter-action-btns">
-            <button class="add-filter-btn" @click="selectAllColumns">Select All</button>
-            <button class="clear-btn" @click="deselectAllColumns">Deselect All</button>
-          </div>
-          <div class="filter-action-btns">
-            <button class="clear-btn" @click="resetColumns">Reset</button>
-            <button class="apply-btn" @click="applyColumns">Apply</button>
-          </div>
-        </div>
-      </div>
-
-      <div class="grid-wrapper" :class="{ fetching: isFetching }" v-show="currentView === 'table'">
-        <AgGridVue
-          class="ag-theme-quartz grid"
-          :columnDefs="columnDefs"
-          :defaultColDef="defaultColDef"
-          rowModelType="infinite"
-          :cacheBlockSize="200"
-          :maxBlocksInCache="20"
-          :infiniteInitialRowCount="1"
-          @grid-ready="onGridReady"
-          @first-data-rendered="onFirstDataRendered"
-        />
-      </div>
-      <div class="map-wrapper" :class="{ fetching: mapLoading }" v-show="currentView === 'map'">
-        <div ref="mapContainer" class="map-container" />
-      </div>
+      <FilterPanel
+        v-show="filterPanelOpen"
+        :columns="fileInfo!.columns"
+        @apply="onFiltersApply"
+        @clear="onFiltersClear"
+      />
+      <SelectPanel
+        v-show="columnPanelOpen"
+        :columns="fileInfo!.columns"
+        :activeColumnVisibility="activeColumnVisibility"
+        @apply="activeColumnVisibility = $event"
+        @reset="onColumnsReset"
+      />
+      <DataGrid
+        v-show="currentView === 'table'"
+        :columns="fileInfo!.columns"
+        :activeFilters="activeFilters"
+        :activeColumnVisibility="activeColumnVisibility"
+        @ready="gridApi = $event"
+        @row-count-changed="filteredRowCount = $event"
+      />
+      <MapView
+        v-if="hasGeoColumns"
+        v-show="currentView === 'map'"
+        :active="currentView === 'map'"
+        :activeFilters="activeFilters"
+        :latColumn="latColumn!"
+        :lonColumn="lonColumn!"
+      />
     </template>
   </div>
 </template>
@@ -836,196 +364,6 @@ button:disabled {
   padding: 0 4px;
 }
 
-/* ---- Filter panel ---- */
-.filter-panel {
-  padding: 8px 14px 4px;
-  background: #fafafa;
-  border-bottom: 1px solid #e0e0e0;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  flex-shrink: 0;
-}
-
-.filter-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.filter-select {
-  padding: 4px 6px;
-  font-size: 0.8rem;
-  font-family: inherit;
-  border: 1px solid #d0d0d0;
-  border-radius: 6px;
-  background: #fff;
-  cursor: pointer;
-}
-
-.filter-select.op-select {
-  min-width: 120px;
-}
-
-.filter-value {
-  padding: 4px 8px;
-  font-size: 0.8rem;
-  font-family: inherit;
-  border: 1px solid #d0d0d0;
-  border-radius: 6px;
-  width: 160px;
-}
-
-.remove-btn {
-  padding: 2px 8px;
-  font-size: 1rem;
-  line-height: 1;
-  background: transparent;
-  color: #999;
-  border: 1px solid #d0d0d0;
-  border-radius: 6px;
-}
-
-.remove-btn:hover:not(:disabled) {
-  background: #fee2e2;
-  color: #b91c1c;
-  border-color: #fca5a5;
-}
-
-.filter-actions {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 4px 0 6px;
-}
-
-.filter-action-btns {
-  display: flex;
-  gap: 6px;
-}
-
-.add-filter-btn {
-  padding: 4px 12px;
-  font-size: 0.8rem;
-  background: transparent;
-  color: #646cff;
-  border: 1px dashed #646cff;
-  border-radius: 6px;
-}
-
-.add-filter-btn:hover:not(:disabled) {
-  background: #efefff;
-}
-
-.clear-btn {
-  padding: 4px 12px;
-  font-size: 0.8rem;
-  background: transparent;
-  color: #555;
-  border: 1px solid #d0d0d0;
-  border-radius: 6px;
-}
-
-.clear-btn:hover:not(:disabled) {
-  background: #f0f0f0;
-}
-
-.apply-btn {
-  padding: 4px 16px;
-  font-size: 0.8rem;
-  background: #646cff;
-  color: #fff;
-  border: none;
-  border-radius: 6px;
-}
-
-.apply-btn:hover:not(:disabled) {
-  background: #535bf2;
-}
-
-/* ---- Column panel ---- */
-.column-panel {
-  padding: 8px 14px 4px;
-  background: #fafafa;
-  border-bottom: 1px solid #e0e0e0;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  flex-shrink: 0;
-}
-
-.column-list {
-  max-height: 240px;
-  overflow-y: auto;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 24px;
-}
-
-.column-item {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 0.82rem;
-  cursor: pointer;
-  min-width: 160px;
-}
-
-.col-item-name {
-  flex: 1;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.col-dtype-badge {
-  font-size: 0.7rem;
-  color: #888;
-  background: #f0f0f0;
-  border-radius: 4px;
-  padding: 1px 5px;
-  white-space: nowrap;
-}
-
-.column-actions {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 4px 0 6px;
-}
-
-/* ---- Grid ---- */
-.grid-wrapper {
-  flex: 1;
-  min-height: 0;
-  position: relative;
-}
-
-.grid-wrapper.fetching::before,
-.map-wrapper.fetching::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 3px;
-  background: linear-gradient(90deg, transparent, #646cff, #535bf2, #646cff, transparent);
-  background-size: 300% 100%;
-  animation: fetch-bar 1.2s ease-in-out infinite;
-  z-index: 10;
-}
-
-@keyframes fetch-bar {
-  0%   { background-position: 100% 0; }
-  100% { background-position: -100% 0; }
-}
-
-.grid {
-  width: 100%;
-  height: 100%;
-}
-
 /* ---- View toggle ---- */
 .view-toggle {
   display: flex;
@@ -1061,18 +399,4 @@ button:disabled {
   color: #fff;
   border-color: #646cff;
 }
-
-/* ---- Map ---- */
-.map-wrapper {
-  flex: 1;
-  min-height: 0;
-  position: relative;
-  overflow: hidden;
-}
-
-.map-container {
-  width: 100%;
-  height: 100%;
-}
-
 </style>

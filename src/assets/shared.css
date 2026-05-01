@@ -1,0 +1,68 @@
+/* Loading progress bar — used by DataGrid (.grid-wrapper) and MapView (.map-wrapper) */
+.fetching::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, transparent, #646cff, #535bf2, #646cff, transparent);
+  background-size: 300% 100%;
+  animation: fetch-bar 1.2s ease-in-out infinite;
+  z-index: 10;
+}
+
+@keyframes fetch-bar {
+  0%   { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}
+
+/* Panel base layout — used by FilterPanel and SelectPanel */
+.panel {
+  padding: 8px 14px 4px;
+  background: #fafafa;
+  border-bottom: 1px solid #e0e0e0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.panel-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 0 6px;
+}
+
+.panel-action-btns {
+  display: flex;
+  gap: 6px;
+}
+
+/* Shared panel button variants — used by FilterPanel and SelectPanel */
+.btn-apply {
+  padding: 4px 16px;
+  font-size: 0.8rem;
+  background: #646cff;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+}
+
+.btn-apply:hover:not(:disabled) {
+  background: #535bf2;
+}
+
+.btn-secondary {
+  padding: 4px 12px;
+  font-size: 0.8rem;
+  background: transparent;
+  color: #555;
+  border: 1px solid #d0d0d0;
+  border-radius: 6px;
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: #f0f0f0;
+}
