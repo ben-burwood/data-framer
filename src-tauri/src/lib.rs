@@ -1,6 +1,7 @@
 mod datastore;
 
 use datastore::{AppState, FileInfo, LoadedFile, RowsResponse};
+use polars::prelude::*;
 use std::sync::Mutex;
 use tauri::State;
 
@@ -72,6 +73,74 @@ fn get_rows(
     Ok(RowsResponse { rows: datastore::frame_to_rows(&df), total_rows })
 }
 
+/// Return all lat/lon coordinate pairs that pass the active filters and optional bounding box.
+/// When `min_lat`/`max_lat`/`min_lon`/`max_lon` are all Some, only rows within that bbox
+/// are returned. When all are None the full (filtered) dataset is returned so the frontend
+/// can compute a fit-bounds extent on first load.
+#[tauri::command]
+fn get_map_points(
+    lat_col: String,
+    lon_col: String,
+    filters: Vec<datastore::FilterSpec>,
+    min_lat: Option<f64>,
+    max_lat: Option<f64>,
+    min_lon: Option<f64>,
+    max_lon: Option<f64>,
+    state: State<'_, AppState>,
+) -> Result<Vec<[f64; 2]>, String> {
+    let (file_path, schema) = {
+        let guard = state.file.lock().unwrap();
+        let loaded = guard.as_ref().ok_or("No file loaded")?;
+        (loaded.path.clone(), loaded.schema.clone())
+    };
+
+    let mut lf = datastore::scan_file(&file_path)?;
+    lf = datastore::apply_filters(lf, &filters, &schema)?;
+
+    // Apply bounding-box filter when all four bounds are provided.
+    if let (Some(min_lat), Some(max_lat), Some(min_lon), Some(max_lon)) =
+        (min_lat, max_lat, min_lon, max_lon)
+    {
+        lf = lf.filter(
+            col(lat_col.as_str())
+                .gt_eq(lit(min_lat))
+                .and(col(lat_col.as_str()).lt_eq(lit(max_lat)))
+                .and(col(lon_col.as_str()).gt_eq(lit(min_lon)))
+                .and(col(lon_col.as_str()).lt_eq(lit(max_lon))),
+        );
+    }
+
+    let df = lf
+        .select([col(lat_col.as_str()), col(lon_col.as_str())])
+        .collect()
+        .map_err(|e| e.to_string())?;
+
+    let lat_series = df
+        .column(&lat_col)
+        .map_err(|e| e.to_string())?
+        .cast(&DataType::Float64)
+        .map_err(|e| e.to_string())?;
+    let lon_series = df
+        .column(&lon_col)
+        .map_err(|e| e.to_string())?
+        .cast(&DataType::Float64)
+        .map_err(|e| e.to_string())?;
+
+    let lats = lat_series.f64().map_err(|e| e.to_string())?;
+    let lons = lon_series.f64().map_err(|e| e.to_string())?;
+
+    let points: Vec<[f64; 2]> = lats
+        .iter()
+        .zip(lons.iter())
+        .filter_map(|(lat, lon)| match (lat, lon) {
+            (Some(lat), Some(lon)) => Some([lat, lon]),
+            _ => None,
+        })
+        .collect();
+
+    Ok(points)
+}
+
 /// Export the current view (with active sort, filters, and column selection) to a file.
 /// Format is inferred from `dest`'s extension: `.parquet` → Parquet, else CSV.
 #[tauri::command]
@@ -113,7 +182,7 @@ pub fn run() {
         })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![load_file, get_rows, export_file])
+        .invoke_handler(tauri::generate_handler![load_file, get_rows, export_file, get_map_points])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

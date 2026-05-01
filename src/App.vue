@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from "vue";
+import { ref, computed, watch, nextTick } from "vue";
 import { AgGridVue } from "ag-grid-vue3";
 import { ModuleRegistry, AllCommunityModule } from "ag-grid-community";
 import type {
@@ -15,6 +15,8 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import "ag-grid-community/styles/ag-grid.css";
 import "ag-grid-community/styles/ag-theme-quartz.css";
+import maplibregl from "maplibre-gl";
+import "maplibre-gl/dist/maplibre-gl.css";
 
 ModuleRegistry.registerModules([AllCommunityModule]);
 
@@ -150,6 +152,27 @@ const selectedColumnNames = computed(() => {
 const hiddenColumnCount = computed(() =>
   (fileInfo.value?.columns.length ?? 0) - visibleColumns.value.length
 );
+
+// ---------------------------------------------------------------------------
+// Map state
+// ---------------------------------------------------------------------------
+const LAT_NAMES = ["lat", "latitude"];
+const LON_NAMES = ["lon", "lng", "longitude"];
+
+const currentView = ref<"table" | "map">("table");
+const latColumn = computed(() =>
+  fileInfo.value?.columns.find(c => LAT_NAMES.includes(c.name.toLowerCase()))?.name ?? null
+);
+const lonColumn = computed(() =>
+  fileInfo.value?.columns.find(c => LON_NAMES.includes(c.name.toLowerCase()))?.name ?? null
+);
+const mapContainer = ref<HTMLElement | null>(null);
+const mapInstance = ref<maplibregl.Map | null>(null);
+const mapLoading = ref(false);
+const mapReady = ref(false);
+let suppressMoveHandler = false;
+
+const hasGeoColumns = computed(() => !!latColumn.value && !!lonColumn.value);
 
 const defaultColDef: ColDef = {
   minWidth: 80,
@@ -369,12 +392,136 @@ async function openFile() {
     const info = await invoke<FileInfo>("load_file", { path });
     fileInfo.value = info;
     initColumnVisibility(info.columns);
+
+    currentView.value = "table";
+    mapReady.value = false;
+    mapInstance.value?.remove();
+    mapInstance.value = null;
+
     view.value = "loaded";
   } catch (err) {
     view.value = "empty";
     alert(`Failed to load file:\n${err}`);
   }
 }
+
+// ---------------------------------------------------------------------------
+// Map
+// ---------------------------------------------------------------------------
+async function switchView(view: "table" | "map") {
+  currentView.value = view;
+  if (view === "map") {
+    await nextTick();
+    if (!mapInstance.value) {
+      initMap();
+    } else if (mapReady.value) {
+      await loadMapPoints();
+    }
+  }
+}
+
+function initMap() {
+  if (!mapContainer.value) return;
+  mapInstance.value = new maplibregl.Map({
+    container: mapContainer.value,
+    style: {
+      version: 8,
+      sources: {
+        osm: {
+          type: "raster",
+          tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+          tileSize: 256,
+          attribution: "© OpenStreetMap contributors",
+        },
+      },
+      layers: [{ id: "osm", type: "raster", source: "osm" }],
+    },
+    center: [-2.5, 54.5],
+    zoom: 5,
+  });
+
+  mapInstance.value.on("load", async () => {
+    mapInstance.value!.addSource("points", {
+      type: "geojson",
+      data: { type: "FeatureCollection", features: [] },
+    });
+    mapInstance.value!.addLayer({
+      id: "points",
+      type: "circle",
+      source: "points",
+      paint: {
+        "circle-radius": 5,
+        "circle-color": "#646cff",
+        "circle-opacity": 0.7,
+      },
+    });
+    mapReady.value = true;
+    await loadMapPoints(true);
+  });
+
+  let moveTimer: ReturnType<typeof setTimeout> | null = null;
+  mapInstance.value.on("moveend", () => {
+    if (suppressMoveHandler) return;
+    if (moveTimer) clearTimeout(moveTimer);
+    moveTimer = setTimeout(() => loadMapPoints(), 300);
+  });
+}
+
+// fit=true: no bbox, then fit map to data extent; fit=false: use current viewport bounds
+async function loadMapPoints(fit = false) {
+  if (!latColumn.value || !lonColumn.value) return;
+  const bounds = fit ? null : mapInstance.value?.getBounds();
+  mapLoading.value = true;
+  try {
+    const points = await invoke<[number, number][]>("get_map_points", {
+      latCol: latColumn.value,
+      lonCol: lonColumn.value,
+      filters: activeFilters.value,
+      minLat: bounds?.getSouth() ?? null,
+      maxLat: bounds?.getNorth() ?? null,
+      minLon: bounds?.getWest() ?? null,
+      maxLon: bounds?.getEast() ?? null,
+    });
+    setMapPoints(points);
+    if (fit && points.length > 0) fitMapToBounds(points);
+  } finally {
+    mapLoading.value = false;
+  }
+}
+
+function setMapPoints(points: [number, number][]) {
+  const source = mapInstance.value?.getSource("points") as maplibregl.GeoJSONSource | undefined;
+  source?.setData({
+    type: "FeatureCollection",
+    features: points.map(([lat, lon]) => ({
+      type: "Feature",
+      geometry: { type: "Point", coordinates: [lon, lat] },
+      properties: {},
+    })),
+  });
+}
+
+function fitMapToBounds(points: [number, number][]) {
+  let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
+  for (const [lat, lon] of points) {
+    if (lat < minLat) minLat = lat;
+    if (lat > maxLat) maxLat = lat;
+    if (lon < minLon) minLon = lon;
+    if (lon > maxLon) maxLon = lon;
+  }
+  suppressMoveHandler = true;
+  mapInstance.value!.once("moveend", () => { suppressMoveHandler = false; });
+  mapInstance.value!.fitBounds(
+    [[minLon, minLat], [maxLon, maxLat]],
+    { padding: 40, duration: 500 },
+  );
+}
+
+watch(activeFilters, () => {
+  if (currentView.value === "map" && mapReady.value) {
+    loadMapPoints(true);
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Export
@@ -450,6 +597,10 @@ async function exportFile() {
         >
           Columns<span v-if="hiddenColumnCount > 0" class="badge">{{ hiddenColumnCount }}</span>
         </button>
+        <div v-if="hasGeoColumns" class="view-toggle">
+          <button :class="{ active: currentView === 'table' }" @click="switchView('table')">Table</button>
+          <button :class="{ active: currentView === 'map' }" @click="switchView('map')">Map</button>
+        </div>
         <button
           class="toolbar-btn"
           :disabled="exportState === 'exporting'"
@@ -521,7 +672,7 @@ async function exportFile() {
         </div>
       </div>
 
-      <div class="grid-wrapper" :class="{ fetching: isFetching }">
+      <div class="grid-wrapper" :class="{ fetching: isFetching }" v-show="currentView === 'table'">
         <AgGridVue
           class="ag-theme-quartz grid"
           :columnDefs="columnDefs"
@@ -533,6 +684,9 @@ async function exportFile() {
           @grid-ready="onGridReady"
           @first-data-rendered="onFirstDataRendered"
         />
+      </div>
+      <div class="map-wrapper" :class="{ fetching: mapLoading }" v-show="currentView === 'map'">
+        <div ref="mapContainer" class="map-container" />
       </div>
     </template>
   </div>
@@ -848,7 +1002,8 @@ button:disabled {
   position: relative;
 }
 
-.grid-wrapper.fetching::before {
+.grid-wrapper.fetching::before,
+.map-wrapper.fetching::before {
   content: "";
   position: absolute;
   top: 0;
@@ -870,4 +1025,54 @@ button:disabled {
   width: 100%;
   height: 100%;
 }
+
+/* ---- View toggle ---- */
+.view-toggle {
+  display: flex;
+  flex-shrink: 0;
+}
+
+.view-toggle button {
+  padding: 4px 12px;
+  font-size: 0.8rem;
+  background: #fff;
+  color: #444;
+  border: 1px solid #d0d0d0;
+  border-radius: 0;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.view-toggle button:first-child {
+  border-radius: 6px 0 0 6px;
+}
+
+.view-toggle button:last-child {
+  border-radius: 0 6px 6px 0;
+  border-left: none;
+}
+
+.view-toggle button:hover:not(.active) {
+  background: #f0f0f0;
+}
+
+.view-toggle button.active {
+  background: #646cff;
+  color: #fff;
+  border-color: #646cff;
+}
+
+/* ---- Map ---- */
+.map-wrapper {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+}
+
+.map-container {
+  width: 100%;
+  height: 100%;
+}
+
 </style>
