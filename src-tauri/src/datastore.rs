@@ -339,6 +339,25 @@ fn parse_value(v: &str, dtype: &str) -> Result<Expr, String> {
 }
 
 // ---------------------------------------------------------------------------
+// Chart data
+// ---------------------------------------------------------------------------
+
+pub fn get_chart_rows(
+    path: &str,
+    x_col: &str,
+    y_cols: &[String],
+    filters: &[FilterSpec],
+    schema: &[ColumnInfo],
+) -> Result<Vec<serde_json::Value>, String> {
+    let cols: Vec<String> = std::iter::once(x_col.to_string())
+        .chain(y_cols.iter().cloned())
+        .collect();
+    let lf = build_pipeline(path, filters, schema, Some(x_col), false, &cols)?;
+    let df = lf.collect().map_err(|e| e.to_string())?;
+    Ok(frame_to_rows(&df))
+}
+
+// ---------------------------------------------------------------------------
 // Shared query pipeline
 // ---------------------------------------------------------------------------
 

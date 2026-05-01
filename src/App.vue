@@ -7,7 +7,8 @@ import type { FileInfo, FilterSpec } from "./types";
 import FilterPanel from "./components/FilterPanel.vue";
 import SelectPanel from "./components/SelectPanel.vue";
 import DataGrid from "./components/DataGrid.vue";
-const MapView = defineAsyncComponent(() => import("./components/MapView.vue"));
+const MapView   = defineAsyncComponent(() => import("./components/MapView.vue"));
+const ChartView = defineAsyncComponent(() => import("./components/ChartView.vue"));
 
 // ---------------------------------------------------------------------------
 // State
@@ -18,7 +19,7 @@ const view = ref<ViewState>("empty");
 const fileInfo = ref<FileInfo | null>(null);
 const activeFilters = ref<FilterSpec[]>([]);
 const activeColumnVisibility = ref<Record<string, boolean>>({});
-const currentView = ref<"table" | "map">("table");
+const currentView = ref<"table" | "map" | "chart">("table");
 const exportState = ref<"idle" | "exporting">("idle");
 const filteredRowCount = ref(0);
 const gridApi = ref<GridApi | null>(null);
@@ -46,6 +47,19 @@ const h3Column = computed(() =>
 const hasMapData = computed(() =>
   (!!latColumn.value && !!lonColumn.value) || !!h3Column.value
 );
+
+// Auto-detect the best default x-axis column for charts:
+// prefer datetime > date > numeric > first column
+const defaultXColumn = computed(() => {
+  const cols = fileInfo.value?.columns ?? [];
+  return (
+    cols.find(c => c.dtype === "datetime")?.name ??
+    cols.find(c => c.dtype === "date")?.name ??
+    cols.find(c => c.dtype === "integer" || c.dtype === "float")?.name ??
+    cols[0]?.name ??
+    null
+  );
+});
 
 const hiddenColumnCount = computed(() => {
   if (!fileInfo.value) return 0;
@@ -181,9 +195,10 @@ function onColumnsReset() {
         >
           Columns<span v-if="hiddenColumnCount > 0" class="badge">{{ hiddenColumnCount }}</span>
         </button>
-        <div v-if="hasMapData" class="view-toggle">
+        <div class="view-toggle">
           <button :class="{ active: currentView === 'table' }" @click="currentView = 'table'">Table</button>
-          <button :class="{ active: currentView === 'map' }" @click="currentView = 'map'">Map</button>
+          <button v-if="hasMapData" :class="{ active: currentView === 'map' }" @click="currentView = 'map'">Map</button>
+          <button :class="{ active: currentView === 'chart' }" @click="currentView = 'chart'">Chart</button>
         </div>
         <button
           class="toolbar-btn"
@@ -222,6 +237,12 @@ function onColumnsReset() {
         :latColumn="latColumn"
         :lonColumn="lonColumn"
         :h3Column="h3Column"
+      />
+      <ChartView
+        v-show="currentView === 'chart'"
+        :columns="fileInfo!.columns"
+        :activeFilters="activeFilters"
+        :defaultXColumn="defaultXColumn"
       />
     </template>
   </div>
@@ -412,6 +433,9 @@ button:disabled {
 
 .view-toggle button:last-child {
   border-radius: 0 var(--ag-border-radius, 4px) var(--ag-border-radius, 4px) 0;
+}
+
+.view-toggle button:not(:first-child) {
   border-left: none;
 }
 

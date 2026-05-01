@@ -179,6 +179,22 @@ fn get_h3_values(
     Ok(out)
 }
 
+#[tauri::command]
+fn get_chart_data(
+    x_col: String,
+    y_cols: Vec<String>,
+    filters: Vec<datastore::FilterSpec>,
+    state: State<'_, AppState>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let (file_path, schema) = {
+        let guard = state.file.lock().unwrap();
+        let loaded = guard.as_ref().ok_or("No file loaded")?;
+        (loaded.path.clone(), loaded.schema.clone())
+    };
+
+    datastore::get_chart_rows(&file_path, &x_col, &y_cols, &filters, &schema)
+}
+
 /// Export the current view (with active sort, filters, and column selection) to a file.
 /// Format is inferred from `dest`'s extension: `.parquet` → Parquet, else CSV.
 #[tauri::command]
@@ -220,7 +236,7 @@ pub fn run() {
         })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![load_file, get_rows, export_file, get_map_points, get_h3_values])
+        .invoke_handler(tauri::generate_handler![load_file, get_rows, export_file, get_map_points, get_h3_values, get_chart_data])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

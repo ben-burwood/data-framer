@@ -22,3 +22,9 @@ export interface RowsResponse {
   rows: Record<string, unknown>[];
   total_rows: number;
 }
+
+export interface ChartConfig {
+  chartType: "line" | "scatter";
+  xColumn: string;
+  yColumns: string[];
+}
