@@ -4,13 +4,14 @@ import { AgGridVue } from "ag-grid-vue3";
 import { ModuleRegistry, AllCommunityModule } from "ag-grid-community";
 import type {
   ColDef,
+  ColumnState,
   FirstDataRenderedEvent,
   GridApi,
   GridReadyEvent,
   IDatasource,
   IGetRowsParams,
 } from "ag-grid-community";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import "ag-grid-community/styles/ag-grid.css";
 import "ag-grid-community/styles/ag-theme-quartz.css";
@@ -122,6 +123,10 @@ const showFilters = ref(false);
 const pendingFilters = ref<FilterSpec[]>([]);
 const activeFilters = ref<FilterSpec[]>([]);
 const filteredRowCount = ref(0);
+
+const exportState   = ref<"idle" | "exporting">("idle");
+const pendingFetches = ref(0);
+const isFetching     = computed(() => pendingFetches.value > 0);
 
 const showColumns             = ref(false);
 const pendingColumnVisibility = ref<Record<string, boolean>>({});
@@ -301,26 +306,28 @@ function schemaToColDefs(columns: ColumnInfo[]): ColDef[] {
 
 function buildDatasource(): IDatasource {
   return {
-    getRows(params: IGetRowsParams) {
+    async getRows(params: IGetRowsParams) {
       const { startRow, endRow, sortModel } = params;
-      invoke<RowsResponse>("get_rows", {
-        offset: startRow,
-        limit: endRow - startRow,
-        sortCol: sortModel[0]?.colId ?? null,
-        sortDesc: sortModel[0]?.sort === "desc",
-        filters: activeFilters.value,
-        columns: selectedColumnNames.value,
-      })
-        .then((r) => {
-          if (filteredRowCount.value !== r.total_rows) {
-            filteredRowCount.value = r.total_rows;
-          }
-          params.successCallback(r.rows, r.total_rows);
-        })
-        .catch((err) => {
-          console.error("get_rows failed:", err);
-          params.failCallback();
+      pendingFetches.value++;
+      try {
+        const r = await invoke<RowsResponse>("get_rows", {
+          offset: startRow,
+          limit: endRow - startRow,
+          sortCol: sortModel[0]?.colId ?? null,
+          sortDesc: sortModel[0]?.sort === "desc",
+          filters: activeFilters.value,
+          columns: selectedColumnNames.value,
         });
+        if (filteredRowCount.value !== r.total_rows) {
+          filteredRowCount.value = r.total_rows;
+        }
+        params.successCallback(r.rows, r.total_rows);
+      } catch (err) {
+        console.error("get_rows failed:", err);
+        params.failCallback();
+      } finally {
+        pendingFetches.value--;
+      }
     },
   };
 }
@@ -368,6 +375,37 @@ async function openFile() {
     alert(`Failed to load file:\n${err}`);
   }
 }
+
+// ---------------------------------------------------------------------------
+// Export
+// ---------------------------------------------------------------------------
+async function exportFile() {
+  const dest = (await save({
+    filters: [
+      { name: "CSV",     extensions: ["csv"]     },
+      { name: "Parquet", extensions: ["parquet"] },
+    ],
+  })) as string | null;
+  if (!dest) return;
+
+  const sortedCol = (gridApi.value?.getColumnState() as ColumnState[] ?? [])
+    .find(c => c.sort != null);
+
+  exportState.value = "exporting";
+  try {
+    await invoke("export_file", {
+      dest,
+      sortCol:  sortedCol?.colId  ?? null,
+      sortDesc: sortedCol?.sort === "desc",
+      filters:  activeFilters.value,
+      columns:  selectedColumnNames.value,
+    });
+  } catch (err) {
+    alert(`Export failed:\n${err}`);
+  } finally {
+    exportState.value = "idle";
+  }
+}
 </script>
 
 <template>
@@ -412,12 +450,17 @@ async function openFile() {
         >
           Columns<span v-if="hiddenColumnCount > 0" class="badge">{{ hiddenColumnCount }}</span>
         </button>
+        <button
+          class="toolbar-btn"
+          :disabled="exportState === 'exporting'"
+          @click="exportFile"
+        >{{ exportState === "exporting" ? "Exporting…" : "Export" }}</button>
         <button class="toolbar-btn" @click="openFile">Open File</button>
       </div>
 
       <!-- Filter panel -->
       <div v-if="showFilters" class="filter-panel">
-        <div v-for="(f, i) in pendingFilters" :key="i" class="filter-row">
+        <div v-for="(f, i) in pendingFilters" :key="`${i}_${f.column}`" class="filter-row">
           <select v-model="f.column" @change="onColumnChange(f)" class="filter-select">
             <option v-for="col in fileInfo!.columns" :key="col.name" :value="col.name">
               {{ col.name }}
@@ -478,17 +521,19 @@ async function openFile() {
         </div>
       </div>
 
-      <AgGridVue
-        class="ag-theme-quartz grid"
-        :columnDefs="columnDefs"
-        :defaultColDef="defaultColDef"
-        rowModelType="infinite"
-        :cacheBlockSize="200"
-        :maxBlocksInCache="20"
-        :infiniteInitialRowCount="1"
-        @grid-ready="onGridReady"
-        @first-data-rendered="onFirstDataRendered"
-      />
+      <div class="grid-wrapper" :class="{ fetching: isFetching }">
+        <AgGridVue
+          class="ag-theme-quartz grid"
+          :columnDefs="columnDefs"
+          :defaultColDef="defaultColDef"
+          rowModelType="infinite"
+          :cacheBlockSize="200"
+          :maxBlocksInCache="20"
+          :infiniteInitialRowCount="1"
+          @grid-ready="onGridReady"
+          @first-data-rendered="onFirstDataRendered"
+        />
+      </div>
     </template>
   </div>
 </template>
@@ -797,8 +842,32 @@ button:disabled {
 }
 
 /* ---- Grid ---- */
-.grid {
+.grid-wrapper {
   flex: 1;
   min-height: 0;
+  position: relative;
+}
+
+.grid-wrapper.fetching::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, transparent, #646cff, #535bf2, #646cff, transparent);
+  background-size: 300% 100%;
+  animation: fetch-bar 1.2s ease-in-out infinite;
+  z-index: 10;
+}
+
+@keyframes fetch-bar {
+  0%   { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}
+
+.grid {
+  width: 100%;
+  height: 100%;
 }
 </style>

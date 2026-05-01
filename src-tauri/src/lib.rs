@@ -1,7 +1,6 @@
 mod datastore;
 
 use datastore::{AppState, FileInfo, LoadedFile, RowsResponse};
-use polars::prelude::*;
 use std::sync::Mutex;
 use tauri::State;
 
@@ -48,26 +47,22 @@ fn get_rows(
         (loaded.path.clone(), loaded.total_rows, loaded.schema.clone())
     };
 
-    let lf = datastore::scan_file(&file_path)?;
-    let lf = datastore::apply_filters(lf, &filters, &schema)?;
+    let lf = datastore::build_pipeline(
+        &file_path,
+        &filters,
+        &schema,
+        sort_col.as_deref(),
+        sort_desc,
+        &columns,
+    )?;
 
     // Count filtered rows only when filters are active (avoids a full scan otherwise).
+    // Sort and column projection don't affect row count, so counting on the full pipeline is fine.
     let total_rows = if filters.is_empty() {
         unfiltered_rows
     } else {
-        datastore::count_lf(lf.clone())?
+        datastore::count_lf(&lf)?
     };
-
-    let lf = if let Some(col) = sort_col {
-        lf.sort(
-            [col.as_str()],
-            SortMultipleOptions::default().with_order_descending(sort_desc),
-        )
-    } else {
-        lf
-    };
-
-    let lf = datastore::apply_column_select(lf, &columns);
 
     let df = lf
         .slice(offset, limit as u32)
@@ -75,6 +70,35 @@ fn get_rows(
         .map_err(|e| e.to_string())?;
 
     Ok(RowsResponse { rows: datastore::frame_to_rows(&df), total_rows })
+}
+
+/// Export the current view (with active sort, filters, and column selection) to a file.
+/// Format is inferred from `dest`'s extension: `.parquet` → Parquet, else CSV.
+#[tauri::command]
+fn export_file(
+    dest: String,
+    sort_col: Option<String>,
+    sort_desc: bool,
+    filters: Vec<datastore::FilterSpec>,
+    columns: Vec<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let (file_path, schema) = {
+        let guard = state.file.lock().unwrap();
+        let loaded = guard.as_ref().ok_or("No file loaded")?;
+        (loaded.path.clone(), loaded.schema.clone())
+    };
+
+    let lf = datastore::build_pipeline(
+        &file_path,
+        &filters,
+        &schema,
+        sort_col.as_deref(),
+        sort_desc,
+        &columns,
+    )?;
+    let mut df = lf.collect().map_err(|e| e.to_string())?;
+    datastore::write_file(&mut df, &dest)
 }
 
 // ---------------------------------------------------------------------------
@@ -89,7 +113,7 @@ pub fn run() {
         })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![load_file, get_rows])
+        .invoke_handler(tauri::generate_handler![load_file, get_rows, export_file])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

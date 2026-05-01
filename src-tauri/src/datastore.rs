@@ -63,7 +63,7 @@ pub fn scan_file(path: &str) -> Result<LazyFrame, String> {
 ///   CSV: counts newlines minus the header row (streaming, no data heap alloc).
 pub fn count_rows(lf: LazyFrame, path: &str) -> Result<usize, String> {
     match file_ext(path).as_str() {
-        "parquet" => count_lf(lf),
+        "parquet" => count_lf(&lf),
         _ => {
             use std::io::BufRead;
             let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
@@ -77,8 +77,8 @@ pub fn count_rows(lf: LazyFrame, path: &str) -> Result<usize, String> {
 
 /// Aggregate `len()` over a LazyFrame — used for both unfiltered parquet counts
 /// and filtered row counts where line-counting is not applicable.
-pub(crate) fn count_lf(lf: LazyFrame) -> Result<usize, String> {
-    lf.select([len().alias("_n")])
+pub(crate) fn count_lf(lf: &LazyFrame) -> Result<usize, String> {
+    lf.clone().select([len().alias("_n")])
         .collect()
         .map_err(|e| e.to_string())?
         .column("_n")
@@ -267,6 +267,25 @@ fn build_filter_expr(spec: &FilterSpec, dtype: &str) -> Result<Expr, String> {
 }
 
 // ---------------------------------------------------------------------------
+// File writing
+// ---------------------------------------------------------------------------
+
+/// Write a DataFrame to disk. Format is inferred from the file extension:
+/// `.parquet` → Parquet, anything else → CSV.
+pub fn write_file(df: &mut DataFrame, path: &str) -> Result<(), String> {
+    let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
+    match file_ext(path).as_str() {
+        "parquet" => ParquetWriter::new(file)
+            .finish(df)
+            .map(|_| ())
+            .map_err(|e| e.to_string()),
+        _ => CsvWriter::new(file)
+            .finish(df)
+            .map_err(|e| e.to_string()),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Column selection
 // ---------------------------------------------------------------------------
 
@@ -317,4 +336,27 @@ fn parse_value(v: &str, dtype: &str) -> Result<Expr, String> {
         // string and everything else: literal string comparison
         _ => Ok(lit(v)),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Shared query pipeline
+// ---------------------------------------------------------------------------
+
+/// Build a ready-to-collect LazyFrame from the common query parameters shared
+/// by `get_rows` and `export_file`: scan → filter → sort → column projection.
+pub fn build_pipeline(
+    path: &str,
+    filters: &[FilterSpec],
+    schema: &[ColumnInfo],
+    sort_col: Option<&str>,
+    sort_desc: bool,
+    columns: &[String],
+) -> Result<LazyFrame, String> {
+    let lf = scan_file(path)?;
+    let lf = apply_filters(lf, filters, schema)?;
+    let lf = match sort_col {
+        Some(c) => lf.sort([c], SortMultipleOptions::default().with_order_descending(sort_desc)),
+        None => lf,
+    };
+    Ok(apply_column_select(lf, columns))
 }
