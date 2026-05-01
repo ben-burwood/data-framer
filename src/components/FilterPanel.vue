@@ -213,11 +213,19 @@ function clearFilters() {
 .filter-select {
   padding: 4px 6px;
   font-size: 0.8rem;
-  font-family: inherit;
-  border: 1px solid #d0d0d0;
-  border-radius: 6px;
-  background: #fff;
+  font-family: var(--ag-font-family, inherit);
+  border: 1px solid var(--ag-input-border-color, var(--ag-border-color, #babfc7));
+  border-radius: var(--ag-border-radius, 4px);
+  background: var(--ag-background-color, #fff);
+  color: var(--ag-foreground-color, #181d1f);
   cursor: pointer;
+}
+
+.filter-select:focus,
+.filter-value:focus {
+  outline: none;
+  border-color: var(--ag-input-focus-border-color, var(--ag-active-color, #2196f3));
+  box-shadow: var(--ag-input-focus-box-shadow, 0 0 0 3px color-mix(in srgb, transparent, var(--ag-active-color, #2196f3) 47%));
 }
 
 .filter-select.op-select {
@@ -227,9 +235,11 @@ function clearFilters() {
 .filter-value {
   padding: 4px 8px;
   font-size: 0.8rem;
-  font-family: inherit;
-  border: 1px solid #d0d0d0;
-  border-radius: 6px;
+  font-family: var(--ag-font-family, inherit);
+  border: 1px solid var(--ag-input-border-color, var(--ag-border-color, #babfc7));
+  border-radius: var(--ag-border-radius, 4px);
+  color: var(--ag-foreground-color, #181d1f);
+  background: var(--ag-background-color, #fff);
   width: 160px;
 }
 
@@ -238,9 +248,10 @@ function clearFilters() {
   font-size: 1rem;
   line-height: 1;
   background: transparent;
-  color: #999;
-  border: 1px solid #d0d0d0;
-  border-radius: 6px;
+  color: var(--ag-disabled-foreground-color, #999);
+  border: 1px solid var(--ag-border-color, #babfc7);
+  border-radius: var(--ag-border-radius, 4px);
+  cursor: pointer;
 }
 
 .remove-btn:hover:not(:disabled) {
@@ -252,13 +263,15 @@ function clearFilters() {
 .add-filter-btn {
   padding: 4px 12px;
   font-size: 0.8rem;
+  font-family: var(--ag-font-family, inherit);
   background: transparent;
-  color: #646cff;
-  border: 1px dashed #646cff;
-  border-radius: 6px;
+  color: var(--ag-active-color, #2196f3);
+  border: 1px dashed var(--ag-active-color, #2196f3);
+  border-radius: var(--ag-border-radius, 4px);
+  cursor: pointer;
 }
 
 .add-filter-btn:hover:not(:disabled) {
-  background: #efefff;
+  background: color-mix(in srgb, transparent, var(--ag-active-color, #2196f3) 10%);
 }
 </style>

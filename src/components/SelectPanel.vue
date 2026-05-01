@@ -96,9 +96,9 @@ function resetColumns() {
 
 .col-dtype-badge {
   font-size: 0.7rem;
-  color: #888;
-  background: #f0f0f0;
-  border-radius: 4px;
+  color: var(--ag-disabled-foreground-color, #888);
+  background: var(--ag-chip-background-color, color-mix(in srgb, transparent, var(--ag-foreground-color, #181d1f) 7%));
+  border-radius: var(--ag-border-radius, 4px);
   padding: 1px 5px;
   white-space: nowrap;
 }

@@ -234,16 +234,33 @@ body,
   margin: 0;
   padding: 0;
   overflow: hidden;
-  font-family: Inter, Avenir, Helvetica, Arial, sans-serif;
+  /* IBM Plex Sans matches the AG Grid Quartz font stack */
+  font-family: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 }
 </style>
 
 <style scoped>
 .app {
+  /* AG Grid Quartz design tokens — used by toolbar, panels, and shared.css */
+  --ag-active-color: #2196f3;
+  --ag-background-color: #fff;
+  --ag-foreground-color: #181d1f;
+  --ag-border-color: color-mix(in srgb, transparent, var(--ag-foreground-color) 15%);
+  --ag-header-background-color: color-mix(in srgb, var(--ag-background-color), var(--ag-foreground-color) 2%);
+  --ag-row-hover-color: color-mix(in srgb, transparent, var(--ag-active-color) 12%);
+  --ag-disabled-foreground-color: color-mix(in srgb, transparent, var(--ag-foreground-color) 50%);
+  --ag-input-border-color: var(--ag-border-color);
+  --ag-input-focus-border-color: var(--ag-active-color);
+  --ag-input-focus-box-shadow: 0 0 0 3px color-mix(in srgb, transparent, var(--ag-active-color) 47%);
+  --ag-chip-background-color: color-mix(in srgb, transparent, var(--ag-foreground-color) 7%);
+  --ag-font-family: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --ag-font-size: 14px;
+  --ag-border-radius: 4px;
+
   display: flex;
   flex-direction: column;
   height: 100%;
-  background: #fff;
+  background: var(--ag-background-color);
 }
 
 /* ---- Empty / loading ---- */
@@ -260,37 +277,37 @@ body,
   align-items: center;
   gap: 16px;
   padding: 48px 64px;
-  border: 2px dashed #d0d0d0;
+  border: 2px dashed var(--ag-border-color, #babfc7);
   border-radius: 16px;
-  color: #555;
+  color: var(--ag-foreground-color, #181d1f);
 }
 
 .icon {
   width: 48px;
   height: 48px;
-  color: #aaa;
+  color: var(--ag-disabled-foreground-color, #aaa);
 }
 
 .hint {
   margin: 0;
   font-size: 0.95rem;
-  color: #888;
+  color: var(--ag-disabled-foreground-color, #888);
 }
 
 button {
   padding: 10px 28px;
-  font-size: 0.95rem;
-  font-family: inherit;
-  border-radius: 8px;
+  font-size: var(--ag-font-size, 14px);
+  font-family: var(--ag-font-family, inherit);
+  border-radius: var(--ag-border-radius, 4px);
   border: none;
-  background: #646cff;
+  background: var(--ag-active-color, #2196f3);
   color: #fff;
   cursor: pointer;
   transition: background 0.15s;
 }
 
 button:hover:not(:disabled) {
-  background: #535bf2;
+  background: color-mix(in srgb, var(--ag-active-color, #2196f3) 82%, #000);
 }
 
 button:disabled {
@@ -304,19 +321,20 @@ button:disabled {
   align-items: center;
   gap: 12px;
   padding: 6px 14px;
-  background: #f5f5f5;
-  border-bottom: 1px solid #e0e0e0;
-  font-size: 0.85rem;
+  background: var(--ag-header-background-color, #f8f8f8);
+  border-bottom: 1px solid var(--ag-border-color, #babfc7);
+  font-size: var(--ag-font-size, 14px);
+  font-family: var(--ag-font-family, inherit);
   flex-shrink: 0;
 }
 
 .file-name {
   font-weight: 600;
-  color: #222;
+  color: var(--ag-foreground-color, #181d1f);
 }
 
 .row-count {
-  color: #777;
+  color: var(--ag-disabled-foreground-color, #777);
 }
 
 .toolbar-btn {
@@ -331,8 +349,8 @@ button:disabled {
 .filters-btn,
 .columns-btn {
   background: transparent;
-  color: #444;
-  border: 1px solid #d0d0d0;
+  color: var(--ag-foreground-color, #444);
+  border: 1px solid var(--ag-border-color, #babfc7);
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -340,21 +358,21 @@ button:disabled {
 
 .filters-btn:hover:not(:disabled),
 .columns-btn:hover:not(:disabled) {
-  background: #f0f0f0;
+  background: var(--ag-row-hover-color, rgba(33, 150, 243, 0.12));
 }
 
 .filters-btn.active,
 .columns-btn.active {
-  background: #efefff;
-  color: #646cff;
-  border-color: #646cff;
+  background: color-mix(in srgb, transparent, var(--ag-active-color, #2196f3) 10%);
+  color: var(--ag-active-color, #2196f3);
+  border-color: var(--ag-active-color, #2196f3);
 }
 
 .badge {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: #646cff;
+  background: var(--ag-active-color, #2196f3);
   color: #fff;
   font-size: 0.7rem;
   font-weight: 700;
@@ -373,30 +391,30 @@ button:disabled {
 .view-toggle button {
   padding: 4px 12px;
   font-size: 0.8rem;
-  background: #fff;
-  color: #444;
-  border: 1px solid #d0d0d0;
+  background: var(--ag-background-color, #fff);
+  color: var(--ag-foreground-color, #444);
+  border: 1px solid var(--ag-border-color, #babfc7);
   border-radius: 0;
   cursor: pointer;
   transition: background 0.15s, color 0.15s;
 }
 
 .view-toggle button:first-child {
-  border-radius: 6px 0 0 6px;
+  border-radius: var(--ag-border-radius, 4px) 0 0 var(--ag-border-radius, 4px);
 }
 
 .view-toggle button:last-child {
-  border-radius: 0 6px 6px 0;
+  border-radius: 0 var(--ag-border-radius, 4px) var(--ag-border-radius, 4px) 0;
   border-left: none;
 }
 
 .view-toggle button:hover:not(.active) {
-  background: #f0f0f0;
+  background: var(--ag-row-hover-color, rgba(33, 150, 243, 0.12));
 }
 
 .view-toggle button.active {
-  background: #646cff;
+  background: var(--ag-active-color, #2196f3);
   color: #fff;
-  border-color: #646cff;
+  border-color: var(--ag-active-color, #2196f3);
 }
 </style>
