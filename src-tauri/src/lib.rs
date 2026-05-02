@@ -3,7 +3,7 @@ mod datastore;
 use datastore::{AppState, FileInfo, LoadedFile, RowsResponse};
 use polars::prelude::*;
 use std::sync::Mutex;
-use tauri::State;
+use tauri::{Manager, State};
 
 // ---------------------------------------------------------------------------
 // Commands
@@ -224,6 +224,13 @@ fn export_file(
     datastore::write_file(&mut df, &dest)
 }
 
+/// Return the file path that was passed as a command-line argument at launch (e.g. via OS
+/// file association), then clear it so subsequent calls return None.
+#[tauri::command]
+fn get_startup_file(state: State<'_, AppState>) -> Option<String> {
+    state.startup_file.lock().unwrap().take()
+}
+
 // ---------------------------------------------------------------------------
 // App entry point
 // ---------------------------------------------------------------------------
@@ -233,10 +240,21 @@ pub fn run() {
     tauri::Builder::default()
         .manage(AppState {
             file: Mutex::new(None),
+            startup_file: Mutex::new(None),
         })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![load_file, get_rows, export_file, get_map_points, get_h3_values, get_chart_data])
+        .setup(|app| {
+            let args: Vec<String> = std::env::args().collect();
+            if let Some(path) = args.get(1) {
+                let lower = path.to_lowercase();
+                if lower.ends_with(".csv") || lower.ends_with(".parquet") {
+                    *app.state::<AppState>().startup_file.lock().unwrap() = Some(path.clone());
+                }
+            }
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![load_file, get_rows, export_file, get_map_points, get_h3_values, get_chart_data, get_startup_file])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

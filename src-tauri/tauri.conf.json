@@ -30,6 +30,20 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
+    ],
+    "fileAssociations": [
+      {
+        "ext": ["csv"],
+        "name": "CSV",
+        "description": "Comma-Separated Values",
+        "role": "Viewer"
+      },
+      {
+        "ext": ["parquet"],
+        "name": "Parquet",
+        "description": "Apache Parquet",
+        "role": "Viewer"
+      }
     ]
   }
 }

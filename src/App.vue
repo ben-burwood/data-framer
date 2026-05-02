@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, defineAsyncComponent } from "vue";
+import { ref, computed, defineAsyncComponent, onMounted } from "vue";
 import type { ColumnState, GridApi } from "ag-grid-community";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
@@ -75,13 +75,7 @@ function initColumnVisibility() {
   activeColumnVisibility.value = vis;
 }
 
-async function openFile() {
-  const path = (await open({
-    multiple: false,
-    filters: [{ name: "Data Files", extensions: ["parquet", "csv"] }],
-  })) as string | null;
-  if (!path) return;
-
+async function loadFileByPath(path: string) {
   view.value = "loading";
   gridApi.value = null;
   filterPanelOpen.value = false;
@@ -100,6 +94,20 @@ async function openFile() {
     alert(`Failed to load file:\n${err}`);
   }
 }
+
+async function openFile() {
+  const path = (await open({
+    multiple: false,
+    filters: [{ name: "Data Files", extensions: ["parquet", "csv"] }],
+  })) as string | null;
+  if (!path) return;
+  await loadFileByPath(path);
+}
+
+onMounted(async () => {
+  const startupFile = await invoke<string | null>("get_startup_file");
+  if (startupFile) await loadFileByPath(startupFile);
+});
 
 // ---------------------------------------------------------------------------
 // Export

@@ -23,6 +23,7 @@ pub struct LoadedFile {
 /// Tauri managed state — wrapped in Mutex so commands can mutate it.
 pub struct AppState {
     pub file: Mutex<Option<LoadedFile>>,
+    pub startup_file: Mutex<Option<String>>,
 }
 
 /// Returned by `load_file` command.
