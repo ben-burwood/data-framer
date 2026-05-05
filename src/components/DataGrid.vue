@@ -11,6 +11,7 @@ import {
   ValidationModule,
 } from "ag-grid-community";
 import type {
+  CellContextMenuEvent,
   ColDef,
   FirstDataRenderedEvent,
   GridApi,
@@ -120,6 +121,17 @@ function onFirstDataRendered(event: FirstDataRenderedEvent) {
 }
 
 // ---------------------------------------------------------------------------
+// Copy cell on right-click
+// ---------------------------------------------------------------------------
+function onCellContextMenu(event: CellContextMenuEvent) {
+  const raw = event.value;
+  const text = raw == null ? "" : String(raw);
+  navigator.clipboard.writeText(text).catch(() => {
+    // Clipboard access was denied or failed; silently ignore
+  });
+}
+
+// ---------------------------------------------------------------------------
 // React to prop changes
 // ---------------------------------------------------------------------------
 watch(
@@ -142,6 +154,7 @@ watch(
       :infiniteInitialRowCount="1"
       @grid-ready="onGridReady"
       @first-data-rendered="onFirstDataRendered"
+      @cell-context-menu="onCellContextMenu"
     />
   </div>
 </template>
@@ -157,5 +170,4 @@ watch(
   width: 100%;
   height: 100%;
 }
-
 </style>
