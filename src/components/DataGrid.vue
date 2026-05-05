@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch } from "vue";
+import { ref, computed, watch, onBeforeUnmount } from "vue";
 import { AgGridVue } from "ag-grid-vue3";
 import {
   ModuleRegistry,
@@ -11,6 +11,7 @@ import {
   ValidationModule,
 } from "ag-grid-community";
 import type {
+  CellContextMenuEvent,
   ColDef,
   FirstDataRenderedEvent,
   GridApi,
@@ -120,6 +121,28 @@ function onFirstDataRendered(event: FirstDataRenderedEvent) {
 }
 
 // ---------------------------------------------------------------------------
+// Copy cell on right-click
+// ---------------------------------------------------------------------------
+const copyToast = ref(false);
+let toastTimer: ReturnType<typeof setTimeout> | null = null;
+
+function onCellContextMenu(event: CellContextMenuEvent) {
+  const raw = event.value;
+  const text = raw == null ? "" : String(raw);
+  navigator.clipboard.writeText(text).then(() => {
+    if (toastTimer !== null) clearTimeout(toastTimer);
+    copyToast.value = true;
+    toastTimer = setTimeout(() => { copyToast.value = false; }, 1500);
+  }).catch(() => {
+    // Clipboard access was denied or failed; silently ignore
+  });
+}
+
+onBeforeUnmount(() => {
+  if (toastTimer !== null) clearTimeout(toastTimer);
+});
+
+// ---------------------------------------------------------------------------
 // React to prop changes
 // ---------------------------------------------------------------------------
 watch(
@@ -142,7 +165,11 @@ watch(
       :infiniteInitialRowCount="1"
       @grid-ready="onGridReady"
       @first-data-rendered="onFirstDataRendered"
+      @cell-context-menu="onCellContextMenu"
     />
+    <transition name="toast-fade">
+      <div v-if="copyToast" class="copy-toast">Copied!</div>
+    </transition>
   </div>
 </template>
 
@@ -158,4 +185,27 @@ watch(
   height: 100%;
 }
 
+.copy-toast {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0, 0, 0, 0.75);
+  color: #fff;
+  font-size: 0.8rem;
+  padding: 6px 16px;
+  border-radius: 4px;
+  pointer-events: none;
+  z-index: 10;
+}
+
+.toast-fade-enter-active,
+.toast-fade-leave-active {
+  transition: opacity 0.25s ease;
+}
+
+.toast-fade-enter-from,
+.toast-fade-leave-to {
+  opacity: 0;
+}
 </style>
