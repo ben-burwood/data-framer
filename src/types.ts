@@ -1,4 +1,7 @@
-export type Dtype = "integer" | "float" | "boolean" | "date" | "datetime" | "string";
+export type Dtype =
+  | "integer" | "float" | "boolean" | "date" | "datetime" | "string"
+  | "decimal" | "time" | "duration" | "categorical" | "binary"
+  | "list" | "struct";
 
 export interface ColumnInfo {
   name: string;

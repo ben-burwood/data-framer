@@ -15,7 +15,7 @@ const props = defineProps<{
 // Derived column lists
 // ---------------------------------------------------------------------------
 const numericColumns = computed(() =>
-  props.columns.filter(c => c.dtype === "integer" || c.dtype === "float")
+  props.columns.filter(c => c.dtype === "integer" || c.dtype === "float" || c.dtype === "decimal")
 );
 
 // ---------------------------------------------------------------------------
@@ -38,7 +38,7 @@ const fetching = ref(false);
 const xAxisType = computed(() => {
   const dtype = props.columns.find(c => c.name === appliedConfig.value?.xColumn)?.dtype;
   if (dtype === "datetime" || dtype === "date") return "time";
-  if (dtype === "integer" || dtype === "float") return "number";
+  if (dtype === "integer" || dtype === "float" || dtype === "decimal") return "number";
   return "category";
 });
 

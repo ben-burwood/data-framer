@@ -71,6 +71,13 @@ const OPS_BY_DTYPE: Record<Dtype, OpDef[]> = {
   ],
   date:     DATE_OPS,
   datetime: DATE_OPS,
+  decimal:  NUMERIC_OPS,
+  categorical: NULL_OPS,
+  time:        NULL_OPS,
+  duration:    NULL_OPS,
+  binary:      NULL_OPS,
+  list:        NULL_OPS,
+  struct:      NULL_OPS,
 };
 
 // ---------------------------------------------------------------------------
@@ -83,7 +90,7 @@ const pendingFilters = ref<FilterSpec[]>([]);
 // ---------------------------------------------------------------------------
 function opDefsForFilter(f: FilterSpec): OpDef[] {
   const col = props.columns.find((c) => c.name === f.column);
-  return col ? OPS_BY_DTYPE[col.dtype] : [];
+  return col ? OPS_BY_DTYPE[col.dtype] ?? [] : [];
 }
 
 function currentOpDef(f: FilterSpec): OpDef | undefined {
@@ -103,7 +110,8 @@ function inputTypeForFilter(f: FilterSpec): string {
   const col = props.columns.find((c) => c.name === f.column);
   switch (col?.dtype) {
     case "integer":
-    case "float":    return "number";
+    case "float":
+    case "decimal":  return "number";
     case "date":     return "date";
     case "datetime": return "datetime-local";
     default:         return "text";

@@ -18,6 +18,7 @@ import type {
   GridReadyEvent,
   IDatasource,
   IGetRowsParams,
+  ValueFormatterParams,
 } from "ag-grid-community";
 import { invoke } from "@tauri-apps/api/core";
 import type { ColumnInfo, FilterSpec, RowsResponse } from "../types";
@@ -59,11 +60,23 @@ const visibleColumns = computed(() =>
   props.columns.filter(c => props.activeColumnVisibility[c.name] !== false)
 );
 
+// Nested cells (list/struct) arrive from the backend as real JSON arrays/objects.
+// AG Grid's default renderer would stringify them to "[object Object]", so render
+// them as compact valid JSON instead.
+function jsonValueFormatter(params: ValueFormatterParams): string {
+  const v = params.value;
+  return v != null && typeof v === "object" ? JSON.stringify(v) : String(v ?? "");
+}
+
+const NUMERIC_DTYPES: readonly string[] = ["integer", "float", "decimal"];
+const NESTED_DTYPES: readonly string[] = ["list", "struct"];
+
 const columnDefs = computed<ColDef[]>(() =>
   visibleColumns.value.map((c) => ({
     field: c.name,
     headerName: c.name,
-    ...(c.dtype === "integer" || c.dtype === "float" ? { type: "numericColumn" } : {}),
+    ...(NUMERIC_DTYPES.includes(c.dtype) ? { type: "numericColumn" } : {}),
+    ...(NESTED_DTYPES.includes(c.dtype) ? { valueFormatter: jsonValueFormatter } : {}),
   }))
 );
 
@@ -125,7 +138,9 @@ function onFirstDataRendered(event: FirstDataRenderedEvent) {
 // ---------------------------------------------------------------------------
 function onCellContextMenu(event: CellContextMenuEvent) {
   const raw = event.value;
-  const text = raw == null ? "" : String(raw);
+  // Nested cells are objects/arrays — copy them as valid JSON, not "[object Object]".
+  const text =
+    raw == null ? "" : typeof raw === "object" ? JSON.stringify(raw) : String(raw);
   navigator.clipboard.writeText(text).catch(() => {
     // Clipboard access was denied or failed; silently ignore
   });

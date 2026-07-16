@@ -1,6 +1,3 @@
 # DataFramer
 
-Built with Tauri
-
-
-`npm run tauri dev`
+Built with Tauri: `npm run tauri dev`

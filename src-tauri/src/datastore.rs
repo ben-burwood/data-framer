@@ -122,6 +122,13 @@ pub fn dtype_to_str(dtype: &DataType) -> &'static str {
         DataType::Boolean => "boolean",
         DataType::Date => "date",
         DataType::Datetime(_, _) => "datetime",
+        DataType::Decimal(..) => "decimal",
+        DataType::Time => "time",
+        DataType::Duration(..) => "duration",
+        DataType::Categorical(..) | DataType::Enum(..) => "categorical",
+        DataType::Binary | DataType::BinaryOffset => "binary",
+        DataType::List(..) | DataType::Array(..) => "list",
+        DataType::Struct(..) => "struct",
         _ => "string",
     }
 }
@@ -172,9 +179,39 @@ fn anyvalue_to_json(v: AnyValue<'_>) -> serde_json::Value {
             .unwrap_or(serde_json::Value::Null),
         AnyValue::String(s) => serde_json::Value::String(s.to_string()),
         AnyValue::StringOwned(s) => serde_json::Value::String(s.to_string()),
-        // Dates, datetimes, categoricals — fall back to Display impl
+        AnyValue::Decimal(v, _precision, scale) => serde_json::Number::from_f64(v as f64 / 10f64.powi(scale as i32))
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
+        // Binary blobs: emit a short descriptor rather than raw bytes.
+        AnyValue::Binary(bytes) => serde_json::Value::String(format!("<{} bytes>", bytes.len())),
+        AnyValue::BinaryOwned(bytes) => serde_json::Value::String(format!("<{} bytes>", bytes.len())),
+        // Nested collections → real JSON arrays, recursing per element.
+        AnyValue::List(series) => list_to_json(&series),
+        AnyValue::Array(series, _) => list_to_json(&series),
+        // Structs → JSON objects, preserving field names (the key win over Display).
+        AnyValue::Struct(_, _, fields) => struct_to_json(&v, fields.iter().map(|f| f.name().to_string())),
+        AnyValue::StructOwned(ref payload) => {
+            let names: Vec<String> = payload.1.iter().map(|f| f.name().to_string()).collect();
+            struct_to_json(&v, names.into_iter())
+        }
         other => serde_json::Value::String(format!("{other}")),
     }
+}
+
+/// Convert a Polars Series (the inner values of a List/Array cell) to a JSON array.
+fn list_to_json(series: &Series) -> serde_json::Value {
+    serde_json::Value::Array(series.iter().map(anyvalue_to_json).collect())
+}
+
+/// Convert a struct AnyValue to a JSON object by zipping field names with values.
+fn struct_to_json(v: &AnyValue<'_>, names: impl Iterator<Item = String>) -> serde_json::Value {
+    let mut values = Vec::new();
+    v._materialize_struct_av(&mut values);
+    let map: serde_json::Map<String, serde_json::Value> = names
+        .zip(values)
+        .map(|(name, av)| (name, anyvalue_to_json(av)))
+        .collect();
+    serde_json::Value::Object(map)
 }
 
 // ---------------------------------------------------------------------------
@@ -308,10 +345,10 @@ fn parse_value(v: &str, dtype: &str) -> Result<Expr, String> {
                 .map_err(|e| format!("Cannot parse '{v}' as integer: {e}"))?;
             Ok(lit(n))
         }
-        "float" => {
+        "float" | "decimal" => {
             let f = v
                 .parse::<f64>()
-                .map_err(|e| format!("Cannot parse '{v}' as float: {e}"))?;
+                .map_err(|e| format!("Cannot parse '{v}' as {dtype}: {e}"))?;
             Ok(lit(f))
         }
         "date" => {
@@ -379,4 +416,73 @@ pub fn build_pipeline(
         None => lf,
     };
     Ok(apply_column_select(lf, columns))
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn struct_serializes_with_field_names() {
+        let df = df!["a" => [1i64, 2], "b" => ["x", "y"]].unwrap();
+        let st = df
+            .lazy()
+            .select([as_struct(vec![col("a"), col("b")]).alias("st")])
+            .collect()
+            .unwrap();
+        assert_eq!(dtype_to_str(st.column("st").unwrap().dtype()), "struct");
+        let rows = frame_to_rows(&st);
+        assert_eq!(rows[0]["st"], serde_json::json!({ "a": 1, "b": "x" }));
+    }
+
+    #[test]
+    fn list_serializes_as_json_array() {
+        let lf = df!["x" => [1i64, 2, 3]]
+            .unwrap()
+            .lazy()
+            .select([col("x").implode().alias("xs")])
+            .collect()
+            .unwrap();
+        assert_eq!(dtype_to_str(lf.column("xs").unwrap().dtype()), "list");
+        let rows = frame_to_rows(&lf);
+        assert_eq!(rows[0]["xs"], serde_json::json!([1, 2, 3]));
+    }
+
+    /// End-to-end: write a Parquet file with nested columns, then read it back
+    /// through the real scan → schema → collect → frame_to_rows path. Guards
+    /// against Arrow yielding differently-shaped AnyValues than lazy-built ones.
+    #[test]
+    fn nested_parquet_round_trip() {
+        let mut df = df!["a" => [1i64, 2], "b" => ["x", "y"]]
+            .unwrap()
+            .lazy()
+            .select([
+                as_struct(vec![col("a"), col("b")]).alias("st"),
+                col("a").implode().over([lit(1)]).alias("xs"),
+            ])
+            .collect()
+            .unwrap();
+
+        let path = std::env::temp_dir().join("data_framer_nested_test.parquet");
+        let path_str = path.to_str().unwrap();
+        write_file(&mut df, path_str).unwrap();
+
+        let mut lf = scan_file(path_str).unwrap();
+        let schema = extract_schema(&mut lf).unwrap();
+        let dtypes: std::collections::HashMap<_, _> =
+            schema.iter().map(|c| (c.name.as_str(), c.dtype.as_str())).collect();
+        assert_eq!(dtypes["st"], "struct");
+        assert_eq!(dtypes["xs"], "list");
+
+        let out = lf.collect().unwrap();
+        let rows = frame_to_rows(&out);
+        assert_eq!(rows[0]["st"], serde_json::json!({ "a": 1, "b": "x" }));
+        assert_eq!(rows[0]["xs"][0], serde_json::json!(1));
+
+        std::fs::remove_file(path).ok();
+    }
 }

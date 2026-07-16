@@ -55,7 +55,7 @@ const defaultXColumn = computed(() => {
   return (
     cols.find(c => c.dtype === "datetime")?.name ??
     cols.find(c => c.dtype === "date")?.name ??
-    cols.find(c => c.dtype === "integer" || c.dtype === "float")?.name ??
+    cols.find(c => c.dtype === "integer" || c.dtype === "float" || c.dtype === "decimal")?.name ??
     cols[0]?.name ??
     null
   );
