@@ -21,7 +21,13 @@ const numericColumns = computed(() =>
 // ---------------------------------------------------------------------------
 // Pending (editable) config
 // ---------------------------------------------------------------------------
-const pendingChartType = ref<"line" | "scatter">("line");
+type ChartType = "line" | "scatter" | "bar";
+const chartTypes: { value: ChartType; label: string }[] = [
+  { value: "line", label: "Line" },
+  { value: "scatter", label: "Scatter" },
+  { value: "bar", label: "Bar" },
+];
+const pendingChartType = ref<ChartType>("line");
 const pendingXColumn = ref<string>(props.defaultXColumn ?? props.columns[0]?.name ?? "");
 const pendingYColumns = ref<string[]>([]);
 
@@ -123,13 +129,11 @@ watch(
         <span class="config-label">Type</span>
         <div class="type-toggle">
           <button
-            :class="{ active: pendingChartType === 'line' }"
-            @click="pendingChartType = 'line'"
-          >Line</button>
-          <button
-            :class="{ active: pendingChartType === 'scatter' }"
-            @click="pendingChartType = 'scatter'"
-          >Scatter</button>
+            v-for="t in chartTypes"
+            :key="t.value"
+            :class="{ active: pendingChartType === t.value }"
+            @click="pendingChartType = t.value"
+          >{{ t.label }}</button>
         </div>
       </div>
 

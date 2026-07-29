@@ -27,7 +27,7 @@ export interface RowsResponse {
 }
 
 export interface ChartConfig {
-  chartType: "line" | "scatter";
+  chartType: "line" | "scatter" | "bar";
   xColumn: string;
   yColumns: string[];
 }
