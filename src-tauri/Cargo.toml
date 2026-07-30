@@ -1,6 +1,6 @@
 [package]
 name = "data-framer"
-version = "0.1.2"
+version = "0.2.0"
 description = "DataFrame Viewer"
 authors = ["you"]
 edition = "2021"
