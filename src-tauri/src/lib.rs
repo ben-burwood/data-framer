@@ -87,14 +87,16 @@ fn get_map_points(
     min_lon: Option<f64>,
     max_lon: Option<f64>,
     state: State<'_, AppState>,
-) -> Result<Vec<[f64; 2]>, String> {
+) -> Result<Vec<datastore::MapPoint>, String> {
     let (file_path, schema) = {
         let guard = state.file.lock().unwrap();
         let loaded = guard.as_ref().ok_or("No file loaded")?;
         (loaded.path.clone(), loaded.schema.clone())
     };
 
-    let mut lf = datastore::scan_file(&file_path)?;
+    // Add the row index *before* filtering so each point keeps its absolute
+    // file position for lazy popup lookups.
+    let mut lf = datastore::scan_file(&file_path)?.with_row_index(datastore::ROW_IDX, None);
     lf = datastore::apply_filters(lf, &filters, &schema)?;
 
     // Apply bounding-box filter when all four bounds are provided.
@@ -111,34 +113,15 @@ fn get_map_points(
     }
 
     let df = lf
-        .select([col(lat_col.as_str()), col(lon_col.as_str())])
+        .select([
+            col(datastore::ROW_IDX),
+            col(lat_col.as_str()),
+            col(lon_col.as_str()),
+        ])
         .collect()
         .map_err(|e| e.to_string())?;
 
-    let lat_series = df
-        .column(&lat_col)
-        .map_err(|e| e.to_string())?
-        .cast(&DataType::Float64)
-        .map_err(|e| e.to_string())?;
-    let lon_series = df
-        .column(&lon_col)
-        .map_err(|e| e.to_string())?
-        .cast(&DataType::Float64)
-        .map_err(|e| e.to_string())?;
-
-    let lats = lat_series.f64().map_err(|e| e.to_string())?;
-    let lons = lon_series.f64().map_err(|e| e.to_string())?;
-
-    let points: Vec<[f64; 2]> = lats
-        .iter()
-        .zip(lons.iter())
-        .filter_map(|(lat, lon)| match (lat, lon) {
-            (Some(lat), Some(lon)) => Some([lat, lon]),
-            _ => None,
-        })
-        .collect();
-
-    Ok(points)
+    datastore::build_map_points(&df, &lat_col, &lon_col)
 }
 
 /// Return all H3 cell index values that pass the active filters as strings.
@@ -148,52 +131,52 @@ fn get_h3_values(
     h3_col: String,
     filters: Vec<datastore::FilterSpec>,
     state: State<'_, AppState>,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<datastore::H3Feature>, String> {
     let (file_path, schema) = {
         let guard = state.file.lock().unwrap();
         let loaded = guard.as_ref().ok_or("No file loaded")?;
         (loaded.path.clone(), loaded.schema.clone())
     };
 
-    let mut lf = datastore::scan_file(&file_path)?;
+    let mut lf = datastore::scan_file(&file_path)?.with_row_index(datastore::ROW_IDX, None);
     lf = datastore::apply_filters(lf, &filters, &schema)?;
 
     let df = lf
-        .select([col(h3_col.as_str())])
+        .select([col(datastore::ROW_IDX), col(h3_col.as_str())])
         .collect()
         .map_err(|e| e.to_string())?;
 
-    let series = df
-        .column(&h3_col)
-        .map_err(|e| e.to_string())?
-        .cast(&DataType::String)
-        .map_err(|e| e.to_string())?;
-
-    let out: Vec<String> = series
-        .str()
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .filter_map(|v| v.map(|s| s.to_string()))
-        .collect();
-
-    Ok(out)
+    datastore::build_h3_features(&df, &h3_col)
 }
 
-/// Return the filtered geometry column decoded from WKB into GeoJSON geometry
-/// objects. The frontend wraps each into a Feature and renders it on the map.
+/// Return the filtered geometry column decoded from WKB into GeoJSON geometries,
+/// each tagged with its source row index. The frontend wraps each into a Feature
+/// and fetches the row's data lazily (via `get_row`) when it's clicked.
 #[tauri::command]
 fn get_geometry(
     geom_col: String,
     filters: Vec<datastore::FilterSpec>,
     state: State<'_, AppState>,
-) -> Result<Vec<serde_json::Value>, String> {
+) -> Result<Vec<datastore::GeomFeature>, String> {
     let (file_path, schema) = {
         let guard = state.file.lock().unwrap();
         let loaded = guard.as_ref().ok_or("No file loaded")?;
         (loaded.path.clone(), loaded.schema.clone())
     };
 
-    datastore::get_geometry_geojson(&file_path, &geom_col, &filters, &schema)
+    datastore::get_geometry_features(&file_path, &geom_col, &filters, &schema)
+}
+
+/// Return a single source row (all columns) by its absolute file index, for the
+/// map feature popup. Filters aren't reapplied: the index already identifies a
+/// specific row the map is displaying.
+#[tauri::command]
+fn get_row(index: i64, state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let file_path = {
+        let guard = state.file.lock().unwrap();
+        guard.as_ref().ok_or("No file loaded")?.path.clone()
+    };
+    datastore::get_row_at(&file_path, index)
 }
 
 #[tauri::command]
@@ -271,7 +254,7 @@ pub fn run() {
             }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![load_file, get_rows, export_file, get_map_points, get_h3_values, get_geometry, get_chart_data, get_startup_file])
+        .invoke_handler(tauri::generate_handler![load_file, get_rows, export_file, get_map_points, get_h3_values, get_geometry, get_row, get_chart_data, get_startup_file])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

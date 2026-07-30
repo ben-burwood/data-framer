@@ -26,19 +26,26 @@ let mapReady = false;
 const mapLoading = ref(false);
 let suppressMoveHandler = false;
 let moveTimer: ReturnType<typeof setTimeout> | null = null;
+let popup: maplibregl.Popup | null = null;
 
 const EMPTY_FC: maplibregl.GeoJSONSourceSpecification["data"] = {
   type: "FeatureCollection",
   features: [],
 };
 
+// Backend map-feature shapes. Each carries `idx` — the row's absolute position
+// in the source file — so a click can fetch just that row's data (see get_row).
+interface MapPoint { lat: number; lon: number; idx: number; }
+interface H3Feature { cell: string; idx: number; }
+interface GeomFeature { geometry: GeoJSON.Geometry; idx: number; }
+
 // ---------------------------------------------------------------------------
 // Lat/lon points
 // ---------------------------------------------------------------------------
-// Returns raw [lat, lon] pairs from the backend (bbox-filtered when fit=false).
-async function fetchLatLonPoints(fit: boolean): Promise<[number, number][]> {
+// Returns points from the backend (bbox-filtered when fit=false).
+async function fetchLatLonPoints(fit: boolean): Promise<MapPoint[]> {
   const bounds = fit ? null : mapInstance?.getBounds();
-  return invoke<[number, number][]>("get_map_points", {
+  return invoke<MapPoint[]>("get_map_points", {
     latCol: props.latColumn,
     lonCol: props.lonColumn,
     filters: props.activeFilters,
@@ -49,14 +56,14 @@ async function fetchLatLonPoints(fit: boolean): Promise<[number, number][]> {
   });
 }
 
-function setLatLonPoints(points: [number, number][]) {
+function setLatLonPoints(points: MapPoint[]) {
   const source = mapInstance?.getSource("points") as maplibregl.GeoJSONSource | undefined;
   source?.setData({
     type: "FeatureCollection",
-    features: points.map(([lat, lon]) => ({
+    features: points.map(p => ({
       type: "Feature",
-      geometry: { type: "Point", coordinates: [lon, lat] },
-      properties: {},
+      geometry: { type: "Point", coordinates: [p.lon, p.lat] },
+      properties: { __idx: p.idx },
     })),
   });
 }
@@ -66,13 +73,13 @@ function setLatLonPoints(points: [number, number][]) {
 // ---------------------------------------------------------------------------
 // Returns polygon vertex coords in [lon, lat] GeoJSON order (for fitMapToBounds).
 async function loadH3Cells(): Promise<[number, number][]> {
-  const values = await invoke<string[]>("get_h3_values", {
+  const cells = await invoke<H3Feature[]>("get_h3_values", {
     h3Col: props.h3Column,
     filters: props.activeFilters,
   });
 
   const allVerts: [number, number][] = [];
-  const features: GeoJSON.Feature[] = values.map(cell => {
+  const features: GeoJSON.Feature[] = cells.map(({ cell, idx }) => {
     // cellToBoundary returns [[lat, lng], ...] — swap to [lng, lat] for GeoJSON
     const boundary = cellToBoundary(cell);
     const ring = boundary.map(([lat, lng]) => [lng, lat] as [number, number]);
@@ -81,7 +88,7 @@ async function loadH3Cells(): Promise<[number, number][]> {
     return {
       type: "Feature",
       geometry: { type: "Polygon", coordinates: [ring] },
-      properties: {},
+      properties: { __idx: idx },
     };
   });
 
@@ -106,15 +113,15 @@ function collectCoords(node: unknown, out: [number, number][]) {
 // Fetches decoded GeoJSON geometries, renders them, and returns their vertices
 // as [lon, lat] pairs (GeoJSON order) for fitMapToBounds.
 async function loadGeometry(): Promise<[number, number][]> {
-  const geoms = await invoke<GeoJSON.Geometry[]>("get_geometry", {
+  const feats = await invoke<GeomFeature[]>("get_geometry", {
     geomCol: props.geomColumn,
     filters: props.activeFilters,
   });
 
   const allVerts: [number, number][] = [];
-  const features: GeoJSON.Feature[] = geoms.map(geometry => {
+  const features: GeoJSON.Feature[] = feats.map(({ geometry, idx }) => {
     collectCoords((geometry as { coordinates?: unknown }).coordinates, allVerts);
-    return { type: "Feature", geometry, properties: {} };
+    return { type: "Feature", geometry, properties: { __idx: idx } };
   });
 
   const source = mapInstance?.getSource("geometry") as maplibregl.GeoJSONSource | undefined;
@@ -147,10 +154,13 @@ function fitMapToBoundsCoords(coords: [number, number][]) {
 // Unified load — runs whichever layers are configured
 // ---------------------------------------------------------------------------
 async function loadAll(fit = false) {
+  // A reload can change or remove the feature the popup points at.
+  popup?.remove();
+  popup = null;
   mapLoading.value = true;
   try {
     const [pts, verts, geomVerts] = await Promise.all([
-      props.latColumn && props.lonColumn ? fetchLatLonPoints(fit) : Promise.resolve([] as [number, number][]),
+      props.latColumn && props.lonColumn ? fetchLatLonPoints(fit) : Promise.resolve([] as MapPoint[]),
       props.h3Column ? loadH3Cells() : Promise.resolve([] as [number, number][]),
       props.geomColumn ? loadGeometry() : Promise.resolve([] as [number, number][]),
     ]);
@@ -159,7 +169,7 @@ async function loadAll(fit = false) {
 
     if (fit) {
       const allCoords: [number, number][] = [
-        ...pts.map(([lat, lon]) => [lon, lat] as [number, number]),
+        ...pts.map(p => [p.lon, p.lat] as [number, number]),
         ...verts,
         ...geomVerts,
       ];
@@ -167,6 +177,59 @@ async function loadAll(fit = false) {
     }
   } finally {
     mapLoading.value = false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Feature popup — shows the clicked feature's full source row
+// ---------------------------------------------------------------------------
+// The interactive layers whose features open a popup, filtered to those that
+// actually exist for the current file.
+function popupLayers(): string[] {
+  return ["points", "h3-fill", "geometry-fill", "geometry-outline", "geometry-points"]
+    .filter(id => mapInstance?.getLayer(id));
+}
+
+const HTML_ESCAPES: Record<string, string> = {
+  "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+};
+function escapeHtml(s: string): string {
+  return s.replace(/[&<>"']/g, c => HTML_ESCAPES[c]);
+}
+
+// Render a row object as a two-column key/value table.
+function renderPopupHtml(row: Record<string, unknown>): string {
+  const body = Object.entries(row)
+    .map(([k, v]) => {
+      const display =
+        v === null || v === undefined ? ""
+        : typeof v === "object" ? JSON.stringify(v)
+        : String(v);
+      return `<tr><th>${escapeHtml(k)}</th><td>${escapeHtml(display)}</td></tr>`;
+    })
+    .join("");
+  return `<div class="map-popup"><table>${body}</table></div>`;
+}
+
+// Open a popup at the click point, then fetch and render just that row.
+async function showFeaturePopup(lngLat: maplibregl.LngLatLike, idx: number) {
+  popup?.remove();
+  popup = new maplibregl.Popup({ maxWidth: "340px" })
+    .setLngLat(lngLat)
+    .setHTML(`<div class="map-popup map-popup-status">Loading…</div>`)
+    .addTo(mapInstance!);
+  const opened = popup;
+  try {
+    const row = await invoke<Record<string, unknown> | null>("get_row", { index: idx });
+    const data = { ...(row ?? {}) };
+    // The geometry column is raw WKB bytes — not useful in the popup.
+    if (props.geomColumn) delete data[props.geomColumn];
+    // The popup may have been closed/replaced while the fetch was in flight.
+    if (popup === opened) popup.setHTML(renderPopupHtml(data));
+  } catch (err) {
+    if (popup === opened) {
+      popup.setHTML(`<div class="map-popup map-popup-status">Failed to load row: ${escapeHtml(String(err))}</div>`);
+    }
   }
 }
 
@@ -284,6 +347,24 @@ function initMap() {
     void loadAll(true);
   });
 
+  // Click a feature → popup with its row data. A single map-level handler
+  // (rather than per-layer) avoids firing twice where fill/outline overlap.
+  mapInstance.on("click", (e) => {
+    const layers = popupLayers();
+    if (layers.length === 0) return;
+    const feats = mapInstance!.queryRenderedFeatures(e.point, { layers });
+    const idx = feats[0]?.properties?.__idx;
+    if (typeof idx !== "number") return;
+    void showFeaturePopup(e.lngLat, idx);
+  });
+
+  // Pointer cursor when hovering a clickable feature.
+  mapInstance.on("mousemove", (e) => {
+    const layers = popupLayers();
+    const over = layers.length > 0 && mapInstance!.queryRenderedFeatures(e.point, { layers }).length > 0;
+    mapInstance!.getCanvas().style.cursor = over ? "pointer" : "";
+  });
+
   mapInstance.on("moveend", () => {
     if (suppressMoveHandler) return;
     if (moveTimer) clearTimeout(moveTimer);
@@ -318,6 +399,8 @@ watch(() => props.activeFilters, () => {
 
 onUnmounted(() => {
   if (moveTimer) clearTimeout(moveTimer);
+  popup?.remove();
+  popup = null;
   mapInstance?.remove();
   mapInstance = null;
 });
@@ -340,5 +423,44 @@ onUnmounted(() => {
 .map-container {
   width: 100%;
   height: 100%;
+}
+</style>
+
+<!-- Not scoped: MapLibre renders popup DOM outside this component's tree. -->
+<style>
+.maplibregl-popup-content {
+  max-height: 320px;
+  overflow: auto;
+  padding: 10px 12px;
+  font-family: var(--ag-font-family, "IBM Plex Sans", sans-serif);
+}
+
+.map-popup table {
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.map-popup th,
+.map-popup td {
+  text-align: left;
+  padding: 2px 0;
+  vertical-align: top;
+}
+
+.map-popup th {
+  color: #646c7a;
+  font-weight: 600;
+  white-space: nowrap;
+  padding-right: 10px;
+}
+
+.map-popup td {
+  color: #181d1f;
+  word-break: break-word;
+}
+
+.map-popup-status {
+  font-size: 12px;
+  color: #646c7a;
 }
 </style>
