@@ -1,7 +1,6 @@
 mod datastore;
 
 use datastore::{AppState, FileInfo, LoadedFile, RowsResponse};
-use polars::prelude::*;
 use std::sync::Mutex;
 use tauri::{Manager, State};
 
@@ -88,40 +87,13 @@ fn get_map_points(
     max_lon: Option<f64>,
     state: State<'_, AppState>,
 ) -> Result<Vec<datastore::MapPoint>, String> {
-    let (file_path, schema) = {
-        let guard = state.file.lock().unwrap();
-        let loaded = guard.as_ref().ok_or("No file loaded")?;
-        (loaded.path.clone(), loaded.schema.clone())
+    let (file_path, schema) = state.loaded()?;
+    // All four bounds present → cull to the viewport; otherwise return everything.
+    let bbox = match (min_lat, max_lat, min_lon, max_lon) {
+        (Some(a), Some(b), Some(c), Some(d)) => Some([a, b, c, d]),
+        _ => None,
     };
-
-    // Add the row index *before* filtering so each point keeps its absolute
-    // file position for lazy popup lookups.
-    let mut lf = datastore::scan_file(&file_path)?.with_row_index(datastore::ROW_IDX, None);
-    lf = datastore::apply_filters(lf, &filters, &schema)?;
-
-    // Apply bounding-box filter when all four bounds are provided.
-    if let (Some(min_lat), Some(max_lat), Some(min_lon), Some(max_lon)) =
-        (min_lat, max_lat, min_lon, max_lon)
-    {
-        lf = lf.filter(
-            col(lat_col.as_str())
-                .gt_eq(lit(min_lat))
-                .and(col(lat_col.as_str()).lt_eq(lit(max_lat)))
-                .and(col(lon_col.as_str()).gt_eq(lit(min_lon)))
-                .and(col(lon_col.as_str()).lt_eq(lit(max_lon))),
-        );
-    }
-
-    let df = lf
-        .select([
-            col(datastore::ROW_IDX),
-            col(lat_col.as_str()),
-            col(lon_col.as_str()),
-        ])
-        .collect()
-        .map_err(|e| e.to_string())?;
-
-    datastore::build_map_points(&df, &lat_col, &lon_col)
+    datastore::get_map_features(&file_path, &lat_col, &lon_col, &filters, &schema, bbox)
 }
 
 /// Return all H3 cell index values that pass the active filters as strings.
@@ -132,21 +104,8 @@ fn get_h3_values(
     filters: Vec<datastore::FilterSpec>,
     state: State<'_, AppState>,
 ) -> Result<Vec<datastore::H3Feature>, String> {
-    let (file_path, schema) = {
-        let guard = state.file.lock().unwrap();
-        let loaded = guard.as_ref().ok_or("No file loaded")?;
-        (loaded.path.clone(), loaded.schema.clone())
-    };
-
-    let mut lf = datastore::scan_file(&file_path)?.with_row_index(datastore::ROW_IDX, None);
-    lf = datastore::apply_filters(lf, &filters, &schema)?;
-
-    let df = lf
-        .select([col(datastore::ROW_IDX), col(h3_col.as_str())])
-        .collect()
-        .map_err(|e| e.to_string())?;
-
-    datastore::build_h3_features(&df, &h3_col)
+    let (file_path, schema) = state.loaded()?;
+    datastore::get_h3_features(&file_path, &h3_col, &filters, &schema)
 }
 
 /// Return the filtered geometry column decoded from WKB into GeoJSON geometries,
@@ -158,12 +117,7 @@ fn get_geometry(
     filters: Vec<datastore::FilterSpec>,
     state: State<'_, AppState>,
 ) -> Result<Vec<datastore::GeomFeature>, String> {
-    let (file_path, schema) = {
-        let guard = state.file.lock().unwrap();
-        let loaded = guard.as_ref().ok_or("No file loaded")?;
-        (loaded.path.clone(), loaded.schema.clone())
-    };
-
+    let (file_path, schema) = state.loaded()?;
     datastore::get_geometry_features(&file_path, &geom_col, &filters, &schema)
 }
 
@@ -172,10 +126,7 @@ fn get_geometry(
 /// specific row the map is displaying.
 #[tauri::command]
 fn get_row(index: i64, state: State<'_, AppState>) -> Result<serde_json::Value, String> {
-    let file_path = {
-        let guard = state.file.lock().unwrap();
-        guard.as_ref().ok_or("No file loaded")?.path.clone()
-    };
+    let file_path = state.loaded_path()?;
     datastore::get_row_at(&file_path, index)
 }
 
@@ -186,12 +137,7 @@ fn get_chart_data(
     filters: Vec<datastore::FilterSpec>,
     state: State<'_, AppState>,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let (file_path, schema) = {
-        let guard = state.file.lock().unwrap();
-        let loaded = guard.as_ref().ok_or("No file loaded")?;
-        (loaded.path.clone(), loaded.schema.clone())
-    };
-
+    let (file_path, schema) = state.loaded()?;
     datastore::get_chart_rows(&file_path, &x_col, &y_cols, &filters, &schema)
 }
 
@@ -206,12 +152,7 @@ fn export_file(
     columns: Vec<String>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let (file_path, schema) = {
-        let guard = state.file.lock().unwrap();
-        let loaded = guard.as_ref().ok_or("No file loaded")?;
-        (loaded.path.clone(), loaded.schema.clone())
-    };
-
+    let (file_path, schema) = state.loaded()?;
     let lf = datastore::build_pipeline(
         &file_path,
         &filters,

@@ -4,6 +4,7 @@ import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { cellToBoundary } from "h3-js";
 import { invoke } from "@tauri-apps/api/core";
+import { formatCellValue } from "../types";
 import type { FilterSpec } from "../types";
 
 const props = defineProps<{
@@ -27,6 +28,7 @@ const mapLoading = ref(false);
 let suppressMoveHandler = false;
 let moveTimer: ReturnType<typeof setTimeout> | null = null;
 let popup: maplibregl.Popup | null = null;
+let interactiveLayers: string[] = [];
 
 const EMPTY_FC: maplibregl.GeoJSONSourceSpecification["data"] = {
   type: "FeatureCollection",
@@ -72,7 +74,9 @@ function setLatLonPoints(points: MapPoint[]) {
 // H3 cells
 // ---------------------------------------------------------------------------
 // Returns polygon vertex coords in [lon, lat] GeoJSON order (for fitMapToBounds).
-async function loadH3Cells(): Promise<[number, number][]> {
+// `fit` gates vertex collection: the returned coords are only used for
+// fit-to-bounds, so the walk is skipped on non-fitting reloads.
+async function loadH3Cells(fit: boolean): Promise<[number, number][]> {
   const cells = await invoke<H3Feature[]>("get_h3_values", {
     h3Col: props.h3Column,
     filters: props.activeFilters,
@@ -84,7 +88,7 @@ async function loadH3Cells(): Promise<[number, number][]> {
     const boundary = cellToBoundary(cell);
     const ring = boundary.map(([lat, lng]) => [lng, lat] as [number, number]);
     ring.push(ring[0]);
-    allVerts.push(...ring);
+    if (fit) allVerts.push(...ring);
     return {
       type: "Feature",
       geometry: { type: "Polygon", coordinates: [ring] },
@@ -112,7 +116,7 @@ function collectCoords(node: unknown, out: [number, number][]) {
 
 // Fetches decoded GeoJSON geometries, renders them, and returns their vertices
 // as [lon, lat] pairs (GeoJSON order) for fitMapToBounds.
-async function loadGeometry(): Promise<[number, number][]> {
+async function loadGeometry(fit: boolean): Promise<[number, number][]> {
   const feats = await invoke<GeomFeature[]>("get_geometry", {
     geomCol: props.geomColumn,
     filters: props.activeFilters,
@@ -120,7 +124,7 @@ async function loadGeometry(): Promise<[number, number][]> {
 
   const allVerts: [number, number][] = [];
   const features: GeoJSON.Feature[] = feats.map(({ geometry, idx }) => {
-    collectCoords((geometry as { coordinates?: unknown }).coordinates, allVerts);
+    if (fit) collectCoords((geometry as { coordinates?: unknown }).coordinates, allVerts);
     return { type: "Feature", geometry, properties: { __idx: idx } };
   });
 
@@ -161,8 +165,8 @@ async function loadAll(fit = false) {
   try {
     const [pts, verts, geomVerts] = await Promise.all([
       props.latColumn && props.lonColumn ? fetchLatLonPoints(fit) : Promise.resolve([] as MapPoint[]),
-      props.h3Column ? loadH3Cells() : Promise.resolve([] as [number, number][]),
-      props.geomColumn ? loadGeometry() : Promise.resolve([] as [number, number][]),
+      props.h3Column ? loadH3Cells(fit) : Promise.resolve([] as [number, number][]),
+      props.geomColumn ? loadGeometry(fit) : Promise.resolve([] as [number, number][]),
     ]);
 
     if (props.latColumn && props.lonColumn) setLatLonPoints(pts);
@@ -183,32 +187,30 @@ async function loadAll(fit = false) {
 // ---------------------------------------------------------------------------
 // Feature popup — shows the clicked feature's full source row
 // ---------------------------------------------------------------------------
-// The interactive layers whose features open a popup, filtered to those that
-// actually exist for the current file.
-function popupLayers(): string[] {
-  return ["points", "h3-fill", "geometry-fill", "geometry-outline", "geometry-points"]
-    .filter(id => mapInstance?.getLayer(id));
+// Build DOM directly (textContent escapes intrinsically) rather than an HTML
+// string — no hand-rolled escaping, no XSS surface.
+function popupTable(row: Record<string, unknown>): HTMLElement {
+  const wrap = document.createElement("div");
+  wrap.className = "map-popup";
+  const table = document.createElement("table");
+  for (const [key, value] of Object.entries(row)) {
+    const th = document.createElement("th");
+    th.textContent = key;
+    const td = document.createElement("td");
+    td.textContent = formatCellValue(value);
+    const tr = document.createElement("tr");
+    tr.append(th, td);
+    table.append(tr);
+  }
+  wrap.append(table);
+  return wrap;
 }
 
-const HTML_ESCAPES: Record<string, string> = {
-  "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-};
-function escapeHtml(s: string): string {
-  return s.replace(/[&<>"']/g, c => HTML_ESCAPES[c]);
-}
-
-// Render a row object as a two-column key/value table.
-function renderPopupHtml(row: Record<string, unknown>): string {
-  const body = Object.entries(row)
-    .map(([k, v]) => {
-      const display =
-        v === null || v === undefined ? ""
-        : typeof v === "object" ? JSON.stringify(v)
-        : String(v);
-      return `<tr><th>${escapeHtml(k)}</th><td>${escapeHtml(display)}</td></tr>`;
-    })
-    .join("");
-  return `<div class="map-popup"><table>${body}</table></div>`;
+function popupStatus(text: string): HTMLElement {
+  const el = document.createElement("div");
+  el.className = "map-popup map-popup-status";
+  el.textContent = text;
+  return el;
 }
 
 // Open a popup at the click point, then fetch and render just that row.
@@ -216,7 +218,7 @@ async function showFeaturePopup(lngLat: maplibregl.LngLatLike, idx: number) {
   popup?.remove();
   popup = new maplibregl.Popup({ maxWidth: "340px" })
     .setLngLat(lngLat)
-    .setHTML(`<div class="map-popup map-popup-status">Loading…</div>`)
+    .setDOMContent(popupStatus("Loading…"))
     .addTo(mapInstance!);
   const opened = popup;
   try {
@@ -225,11 +227,9 @@ async function showFeaturePopup(lngLat: maplibregl.LngLatLike, idx: number) {
     // The geometry column is raw WKB bytes — not useful in the popup.
     if (props.geomColumn) delete data[props.geomColumn];
     // The popup may have been closed/replaced while the fetch was in flight.
-    if (popup === opened) popup.setHTML(renderPopupHtml(data));
+    if (popup === opened) popup.setDOMContent(popupTable(data));
   } catch (err) {
-    if (popup === opened) {
-      popup.setHTML(`<div class="map-popup map-popup-status">Failed to load row: ${escapeHtml(String(err))}</div>`);
-    }
+    if (popup === opened) popup.setDOMContent(popupStatus(`Failed to load row: ${String(err)}`));
   }
 }
 
@@ -343,6 +343,17 @@ function initMap() {
       mapInstance!.addLayer(GEOM_LINE_LAYER);
       mapInstance!.addLayer(GEOM_CIRCLE_LAYER);
     }
+
+    // Cache the clickable layers, then wire per-layer hover cursors. MapLibre
+    // hit-tests internally and fires only on enter/leave — far cheaper than
+    // querying features on every mousemove.
+    interactiveLayers = ["points", "h3-fill", "geometry-fill", "geometry-outline", "geometry-points"]
+      .filter(id => mapInstance!.getLayer(id));
+    for (const id of interactiveLayers) {
+      mapInstance!.on("mouseenter", id, () => { mapInstance!.getCanvas().style.cursor = "pointer"; });
+      mapInstance!.on("mouseleave", id, () => { mapInstance!.getCanvas().style.cursor = ""; });
+    }
+
     mapReady = true;
     void loadAll(true);
   });
@@ -350,19 +361,11 @@ function initMap() {
   // Click a feature → popup with its row data. A single map-level handler
   // (rather than per-layer) avoids firing twice where fill/outline overlap.
   mapInstance.on("click", (e) => {
-    const layers = popupLayers();
-    if (layers.length === 0) return;
-    const feats = mapInstance!.queryRenderedFeatures(e.point, { layers });
+    if (interactiveLayers.length === 0) return;
+    const feats = mapInstance!.queryRenderedFeatures(e.point, { layers: interactiveLayers });
     const idx = feats[0]?.properties?.__idx;
     if (typeof idx !== "number") return;
     void showFeaturePopup(e.lngLat, idx);
-  });
-
-  // Pointer cursor when hovering a clickable feature.
-  mapInstance.on("mousemove", (e) => {
-    const layers = popupLayers();
-    const over = layers.length > 0 && mapInstance!.queryRenderedFeatures(e.point, { layers }).length > 0;
-    mapInstance!.getCanvas().style.cursor = over ? "pointer" : "";
   });
 
   mapInstance.on("moveend", () => {

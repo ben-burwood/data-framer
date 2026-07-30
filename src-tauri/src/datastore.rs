@@ -26,6 +26,22 @@ pub struct AppState {
     pub startup_file: Mutex<Option<String>>,
 }
 
+impl AppState {
+    /// Path and schema of the currently loaded file, erroring if none is open.
+    /// Cloned out so the lock isn't held across the subsequent file scan/collect.
+    pub fn loaded(&self) -> Result<(String, Vec<ColumnInfo>), String> {
+        let guard = self.file.lock().unwrap();
+        let f = guard.as_ref().ok_or("No file loaded")?;
+        Ok((f.path.clone(), f.schema.clone()))
+    }
+
+    /// Path of the currently loaded file, erroring if none is open.
+    pub fn loaded_path(&self) -> Result<String, String> {
+        let guard = self.file.lock().unwrap();
+        Ok(guard.as_ref().ok_or("No file loaded")?.path.clone())
+    }
+}
+
 /// Returned by `load_file` command.
 #[derive(Debug, Serialize)]
 pub struct FileInfo {
@@ -431,55 +447,52 @@ pub fn get_chart_rows(
 // Geometry (GeoParquet)
 // ---------------------------------------------------------------------------
 
-/// Decode the (filtered) WKB geometry column into GeoJSON geometries, each tagged
-/// with its source row index. Null and unparseable rows are skipped so a single
-/// bad blob can't blank the whole map. Coordinates are emitted verbatim
-/// (GeoParquet geometry is stored lon/lat, which is also GeoJSON order).
-pub fn get_geometry_features(
+/// Shared prefix for the three map-feature queries: scan the file, tag every row
+/// with its absolute pre-filter index (`ROW_IDX`), then apply the active filters.
+fn map_scan(
     path: &str,
-    geom_col: &str,
     filters: &[FilterSpec],
     schema: &[ColumnInfo],
-) -> Result<Vec<GeomFeature>, String> {
-    let mut lf = scan_file(path)?.with_row_index(ROW_IDX, None);
-    lf = apply_filters(lf, filters, schema)?;
+) -> Result<LazyFrame, String> {
+    let lf = scan_file(path)?.with_row_index(ROW_IDX, None);
+    apply_filters(lf, filters, schema)
+}
+
+/// Read the `ROW_IDX` column of a collected map-feature frame as an index array.
+fn row_idx(df: &DataFrame) -> Result<&IdxCa, String> {
+    df.column(ROW_IDX)
+        .and_then(|c| c.idx())
+        .map_err(|e| e.to_string())
+}
+
+/// Filtered lat/lon points, each tagged with its source row index. When `bbox`
+/// (`[min_lat, max_lat, min_lon, max_lon]`) is given, only points inside it are
+/// returned. Rows with a null coordinate are dropped.
+pub fn get_map_features(
+    path: &str,
+    lat_col: &str,
+    lon_col: &str,
+    filters: &[FilterSpec],
+    schema: &[ColumnInfo],
+    bbox: Option<[f64; 4]>,
+) -> Result<Vec<MapPoint>, String> {
+    let mut lf = map_scan(path, filters, schema)?;
+    if let Some([min_lat, max_lat, min_lon, max_lon]) = bbox {
+        lf = lf.filter(
+            col(lat_col)
+                .gt_eq(lit(min_lat))
+                .and(col(lat_col).lt_eq(lit(max_lat)))
+                .and(col(lon_col).gt_eq(lit(min_lon)))
+                .and(col(lon_col).lt_eq(lit(max_lon))),
+        );
+    }
 
     let df = lf
-        .select([col(ROW_IDX), col(geom_col)])
+        .select([col(ROW_IDX), col(lat_col), col(lon_col)])
         .collect()
         .map_err(|e| e.to_string())?;
 
-    let idx = df.column(ROW_IDX).map_err(|e| e.to_string())?;
-    let idx = idx.idx().map_err(|e| e.to_string())?;
-    // The column arrives as an Arrow extension type (geoarrow.wkb) which can't be
-    // `.cast()`, but its AnyValues already surface as Binary storage — read those.
-    let column = df.column(geom_col).map_err(|e| e.to_string())?;
-
-    let mut out = Vec::with_capacity(column.len());
-    for i in 0..column.len() {
-        // Decode within the match: BinaryOwned's bytes live only as long as the
-        // AnyValue temporary, so they can't escape the arm.
-        let geom = match column.get(i) {
-            Ok(AnyValue::Binary(b)) => wkb_to_geojson(b).ok(),
-            Ok(AnyValue::BinaryOwned(b)) => wkb_to_geojson(&b).ok(),
-            _ => None,
-        };
-        if let (Some(geometry), Some(row)) = (geom, idx.get(i)) {
-            out.push(GeomFeature { geometry, idx: row });
-        }
-    }
-    Ok(out)
-}
-
-/// Build lat/lon map points from an already-collected frame that includes the
-/// `ROW_IDX` column. Rows with a null coordinate are dropped.
-pub fn build_map_points(
-    df: &DataFrame,
-    lat_col: &str,
-    lon_col: &str,
-) -> Result<Vec<MapPoint>, String> {
-    let idx = df.column(ROW_IDX).map_err(|e| e.to_string())?;
-    let idx = idx.idx().map_err(|e| e.to_string())?;
+    let idx = row_idx(&df)?;
     let lat_s = df
         .column(lat_col)
         .map_err(|e| e.to_string())?
@@ -502,11 +515,20 @@ pub fn build_map_points(
     Ok(out)
 }
 
-/// Build H3 cell features from an already-collected frame that includes the
-/// `ROW_IDX` column. Rows with a null cell value are dropped.
-pub fn build_h3_features(df: &DataFrame, h3_col: &str) -> Result<Vec<H3Feature>, String> {
-    let idx = df.column(ROW_IDX).map_err(|e| e.to_string())?;
-    let idx = idx.idx().map_err(|e| e.to_string())?;
+/// Filtered H3 cell features, each tagged with its source row index. Rows with a
+/// null cell value are dropped.
+pub fn get_h3_features(
+    path: &str,
+    h3_col: &str,
+    filters: &[FilterSpec],
+    schema: &[ColumnInfo],
+) -> Result<Vec<H3Feature>, String> {
+    let df = map_scan(path, filters, schema)?
+        .select([col(ROW_IDX), col(h3_col)])
+        .collect()
+        .map_err(|e| e.to_string())?;
+
+    let idx = row_idx(&df)?;
     let cells = df
         .column(h3_col)
         .map_err(|e| e.to_string())?
@@ -518,6 +540,42 @@ pub fn build_h3_features(df: &DataFrame, h3_col: &str) -> Result<Vec<H3Feature>,
     for (row, cell) in idx.into_iter().zip(cells.into_iter()) {
         if let (Some(row), Some(cell)) = (row, cell) {
             out.push(H3Feature { cell: cell.to_string(), idx: row });
+        }
+    }
+    Ok(out)
+}
+
+/// Decode the (filtered) WKB geometry column into GeoJSON geometries, each tagged
+/// with its source row index. Null and unparseable rows are skipped so a single
+/// bad blob can't blank the whole map. Coordinates are emitted verbatim
+/// (GeoParquet geometry is stored lon/lat, which is also GeoJSON order).
+pub fn get_geometry_features(
+    path: &str,
+    geom_col: &str,
+    filters: &[FilterSpec],
+    schema: &[ColumnInfo],
+) -> Result<Vec<GeomFeature>, String> {
+    let df = map_scan(path, filters, schema)?
+        .select([col(ROW_IDX), col(geom_col)])
+        .collect()
+        .map_err(|e| e.to_string())?;
+
+    let idx = row_idx(&df)?;
+    // The column arrives as an Arrow extension type (geoarrow.wkb) which can't be
+    // `.cast()`, but its AnyValues already surface as Binary storage — read those.
+    let column = df.column(geom_col).map_err(|e| e.to_string())?;
+
+    let mut out = Vec::with_capacity(column.len());
+    for i in 0..column.len() {
+        // Decode within the match: BinaryOwned's bytes live only as long as the
+        // AnyValue temporary, so they can't escape the arm.
+        let geom = match column.get(i) {
+            Ok(AnyValue::Binary(b)) => wkb_to_geojson(b).ok(),
+            Ok(AnyValue::BinaryOwned(b)) => wkb_to_geojson(&b).ok(),
+            _ => None,
+        };
+        if let (Some(geometry), Some(row)) = (geom, idx.get(i)) {
+            out.push(GeomFeature { geometry, idx: row });
         }
     }
     Ok(out)
@@ -538,7 +596,7 @@ pub fn get_row_at(path: &str, index: i64) -> Result<serde_json::Value, String> {
 /// Convert a single WKB blob into a GeoJSON geometry `serde_json::Value`.
 fn wkb_to_geojson(bytes: &[u8]) -> Result<serde_json::Value, String> {
     use geozero::ToJson;
-    let json = geozero::wkb::Wkb(bytes.to_vec())
+    let json = geozero::wkb::Wkb(bytes)
         .to_json()
         .map_err(|e| e.to_string())?;
     serde_json::from_str(&json).map_err(|e| e.to_string())

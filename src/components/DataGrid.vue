@@ -21,6 +21,7 @@ import type {
   ValueFormatterParams,
 } from "ag-grid-community";
 import { invoke } from "@tauri-apps/api/core";
+import { formatCellValue } from "../types";
 import type { ColumnInfo, FilterSpec, RowsResponse } from "../types";
 
 ModuleRegistry.registerModules([
@@ -64,8 +65,7 @@ const visibleColumns = computed(() =>
 // AG Grid's default renderer would stringify them to "[object Object]", so render
 // them as compact valid JSON instead.
 function jsonValueFormatter(params: ValueFormatterParams): string {
-  const v = params.value;
-  return v != null && typeof v === "object" ? JSON.stringify(v) : String(v ?? "");
+  return formatCellValue(params.value);
 }
 
 const NUMERIC_DTYPES: readonly string[] = ["integer", "float", "decimal"];
@@ -137,10 +137,8 @@ function onFirstDataRendered(event: FirstDataRenderedEvent) {
 // Copy cell on right-click
 // ---------------------------------------------------------------------------
 function onCellContextMenu(event: CellContextMenuEvent) {
-  const raw = event.value;
   // Nested cells are objects/arrays — copy them as valid JSON, not "[object Object]".
-  const text =
-    raw == null ? "" : typeof raw === "object" ? JSON.stringify(raw) : String(raw);
+  const text = formatCellValue(event.value);
   navigator.clipboard.writeText(text).catch(() => {
     // Clipboard access was denied or failed; silently ignore
   });
