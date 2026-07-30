@@ -1,3 +1,6 @@
+*.parquet
+*.csv
+
 # Logs
 logs
 *.log

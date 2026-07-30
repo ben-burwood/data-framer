@@ -129,6 +129,9 @@ pub fn dtype_to_str(dtype: &DataType) -> &'static str {
         DataType::Binary | DataType::BinaryOffset => "binary",
         DataType::List(..) | DataType::Array(..) => "list",
         DataType::Struct(..) => "struct",
+        // Arrow extension types (e.g. GeoParquet's `geoarrow.wkb`) are unwrapped to
+        // their underlying storage type — a WKB geometry column reads back as binary.
+        DataType::Extension(_, storage) => dtype_to_str(storage),
         _ => "string",
     }
 }
