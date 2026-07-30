@@ -12,6 +12,7 @@ const props = defineProps<{
   latColumn: string | null;
   lonColumn: string | null;
   h3Column: string | null;
+  geomColumn: string | null;
 }>();
 
 // ---------------------------------------------------------------------------
@@ -90,6 +91,38 @@ async function loadH3Cells(): Promise<[number, number][]> {
 }
 
 // ---------------------------------------------------------------------------
+// WKB geometry (GeoParquet)
+// ---------------------------------------------------------------------------
+// Recursively collect every [lon, lat] position out of a GeoJSON coordinates
+// array of any nesting depth (Point → MultiPolygon), for fit-to-bounds.
+function collectCoords(node: unknown, out: [number, number][]) {
+  if (Array.isArray(node) && typeof node[0] === "number") {
+    out.push([node[0], node[1] as number]);
+  } else if (Array.isArray(node)) {
+    for (const child of node) collectCoords(child, out);
+  }
+}
+
+// Fetches decoded GeoJSON geometries, renders them, and returns their vertices
+// as [lon, lat] pairs (GeoJSON order) for fitMapToBounds.
+async function loadGeometry(): Promise<[number, number][]> {
+  const geoms = await invoke<GeoJSON.Geometry[]>("get_geometry", {
+    geomCol: props.geomColumn,
+    filters: props.activeFilters,
+  });
+
+  const allVerts: [number, number][] = [];
+  const features: GeoJSON.Feature[] = geoms.map(geometry => {
+    collectCoords((geometry as { coordinates?: unknown }).coordinates, allVerts);
+    return { type: "Feature", geometry, properties: {} };
+  });
+
+  const source = mapInstance?.getSource("geometry") as maplibregl.GeoJSONSource | undefined;
+  source?.setData({ type: "FeatureCollection", features });
+  return allVerts;
+}
+
+// ---------------------------------------------------------------------------
 // Fit map to data extent — accepts [lon, lat] pairs (GeoJSON order)
 // ---------------------------------------------------------------------------
 function fitMapToBoundsCoords(coords: [number, number][]) {
@@ -116,9 +149,10 @@ function fitMapToBoundsCoords(coords: [number, number][]) {
 async function loadAll(fit = false) {
   mapLoading.value = true;
   try {
-    const [pts, verts] = await Promise.all([
+    const [pts, verts, geomVerts] = await Promise.all([
       props.latColumn && props.lonColumn ? fetchLatLonPoints(fit) : Promise.resolve([] as [number, number][]),
       props.h3Column ? loadH3Cells() : Promise.resolve([] as [number, number][]),
+      props.geomColumn ? loadGeometry() : Promise.resolve([] as [number, number][]),
     ]);
 
     if (props.latColumn && props.lonColumn) setLatLonPoints(pts);
@@ -127,6 +161,7 @@ async function loadAll(fit = false) {
       const allCoords: [number, number][] = [
         ...pts.map(([lat, lon]) => [lon, lat] as [number, number]),
         ...verts,
+        ...geomVerts,
       ];
       if (allCoords.length > 0) fitMapToBoundsCoords(allCoords);
     }
@@ -184,6 +219,42 @@ const H3_LINE_LAYER: maplibregl.LineLayerSpecification = {
   },
 };
 
+// Three layers on one source cover any geometry type: fill renders polygon
+// interiors, line renders LineStrings and polygon outlines, circle renders Points.
+const GEOM_FILL_LAYER: maplibregl.FillLayerSpecification = {
+  id: "geometry-fill",
+  type: "fill",
+  source: "geometry",
+  filter: ["match", ["geometry-type"], ["Polygon", "MultiPolygon"], true, false],
+  paint: {
+    "fill-color": "#646cff",
+    "fill-opacity": 0.25,
+  },
+};
+
+const GEOM_LINE_LAYER: maplibregl.LineLayerSpecification = {
+  id: "geometry-outline",
+  type: "line",
+  source: "geometry",
+  paint: {
+    "line-color": "#4149c9",
+    "line-width": 1,
+    "line-opacity": 0.9,
+  },
+};
+
+const GEOM_CIRCLE_LAYER: maplibregl.CircleLayerSpecification = {
+  id: "geometry-points",
+  type: "circle",
+  source: "geometry",
+  filter: ["match", ["geometry-type"], ["Point", "MultiPoint"], true, false],
+  paint: {
+    "circle-radius": 5,
+    "circle-color": "#646cff",
+    "circle-opacity": 0.7,
+  },
+};
+
 function initMap() {
   if (!mapContainer.value) return;
   mapInstance = new maplibregl.Map({
@@ -202,6 +273,12 @@ function initMap() {
       mapInstance!.addSource("h3-cells", { type: "geojson", data: EMPTY_FC });
       mapInstance!.addLayer(H3_FILL_LAYER);
       mapInstance!.addLayer(H3_LINE_LAYER);
+    }
+    if (props.geomColumn) {
+      mapInstance!.addSource("geometry", { type: "geojson", data: EMPTY_FC });
+      mapInstance!.addLayer(GEOM_FILL_LAYER);
+      mapInstance!.addLayer(GEOM_LINE_LAYER);
+      mapInstance!.addLayer(GEOM_CIRCLE_LAYER);
     }
     mapReady = true;
     void loadAll(true);

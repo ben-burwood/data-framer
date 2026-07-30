@@ -179,6 +179,23 @@ fn get_h3_values(
     Ok(out)
 }
 
+/// Return the filtered geometry column decoded from WKB into GeoJSON geometry
+/// objects. The frontend wraps each into a Feature and renders it on the map.
+#[tauri::command]
+fn get_geometry(
+    geom_col: String,
+    filters: Vec<datastore::FilterSpec>,
+    state: State<'_, AppState>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let (file_path, schema) = {
+        let guard = state.file.lock().unwrap();
+        let loaded = guard.as_ref().ok_or("No file loaded")?;
+        (loaded.path.clone(), loaded.schema.clone())
+    };
+
+    datastore::get_geometry_geojson(&file_path, &geom_col, &filters, &schema)
+}
+
 #[tauri::command]
 fn get_chart_data(
     x_col: String,
@@ -254,7 +271,7 @@ pub fn run() {
             }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![load_file, get_rows, export_file, get_map_points, get_h3_values, get_chart_data, get_startup_file])
+        .invoke_handler(tauri::generate_handler![load_file, get_rows, export_file, get_map_points, get_h3_values, get_geometry, get_chart_data, get_startup_file])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

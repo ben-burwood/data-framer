@@ -32,6 +32,7 @@ const columnPanelOpen = ref(false);
 const LAT_NAMES = ["lat", "latitude"];
 const LON_NAMES = ["lon", "lng", "longitude"];
 const H3_NAMES  = ["h3", "h3_index", "h3index", "h3_cell", "h3cell", "h3point"];
+const GEOM_NAMES = ["geometry", "geom", "the_geom", "wkb_geometry", "wkb"];
 
 const fileName = computed(() => fileInfo.value?.path.split(/[\\/]/).pop() ?? "");
 
@@ -44,8 +45,13 @@ const lonColumn = computed(() =>
 const h3Column = computed(() =>
   fileInfo.value?.columns.find(c => H3_NAMES.includes(c.name.toLowerCase()))?.name ?? null
 );
+const geomColumn = computed(() =>
+  fileInfo.value?.columns.find(
+    c => c.dtype === "binary" && GEOM_NAMES.includes(c.name.toLowerCase())
+  )?.name ?? null
+);
 const hasMapData = computed(() =>
-  (!!latColumn.value && !!lonColumn.value) || !!h3Column.value
+  (!!latColumn.value && !!lonColumn.value) || !!h3Column.value || !!geomColumn.value
 );
 
 // Auto-detect the best default x-axis column for charts:
@@ -245,6 +251,7 @@ function onColumnsReset() {
         :latColumn="latColumn"
         :lonColumn="lonColumn"
         :h3Column="h3Column"
+        :geomColumn="geomColumn"
       />
       <ChartView
         v-show="currentView === 'chart'"

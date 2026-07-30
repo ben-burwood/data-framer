@@ -399,6 +399,56 @@ pub fn get_chart_rows(
 }
 
 // ---------------------------------------------------------------------------
+// Geometry (GeoParquet)
+// ---------------------------------------------------------------------------
+
+/// Decode the (filtered) WKB geometry column into a list of GeoJSON geometry
+/// objects. Null and unparseable rows are skipped so a single bad blob can't
+/// blank the whole map. Coordinates are emitted verbatim (GeoParquet geometry
+/// is stored lon/lat, which is also GeoJSON order).
+pub fn get_geometry_geojson(
+    path: &str,
+    geom_col: &str,
+    filters: &[FilterSpec],
+    schema: &[ColumnInfo],
+) -> Result<Vec<serde_json::Value>, String> {
+    let mut lf = scan_file(path)?;
+    lf = apply_filters(lf, filters, schema)?;
+
+    let df = lf
+        .select([col(geom_col)])
+        .collect()
+        .map_err(|e| e.to_string())?;
+
+    // The column arrives as an Arrow extension type (geoarrow.wkb) which can't be
+    // `.cast()`, but its AnyValues already surface as Binary storage — read those.
+    let column = df.column(geom_col).map_err(|e| e.to_string())?;
+    let mut out = Vec::with_capacity(column.len());
+    for i in 0..column.len() {
+        // Decode within the match: BinaryOwned's bytes live only as long as the
+        // AnyValue temporary, so they can't escape the arm.
+        let geom = match column.get(i) {
+            Ok(AnyValue::Binary(b)) => wkb_to_geojson(b).ok(),
+            Ok(AnyValue::BinaryOwned(b)) => wkb_to_geojson(&b).ok(),
+            _ => None,
+        };
+        if let Some(geom) = geom {
+            out.push(geom);
+        }
+    }
+    Ok(out)
+}
+
+/// Convert a single WKB blob into a GeoJSON geometry `serde_json::Value`.
+fn wkb_to_geojson(bytes: &[u8]) -> Result<serde_json::Value, String> {
+    use geozero::ToJson;
+    let json = geozero::wkb::Wkb(bytes.to_vec())
+        .to_json()
+        .map_err(|e| e.to_string())?;
+    serde_json::from_str(&json).map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
 // Shared query pipeline
 // ---------------------------------------------------------------------------
 
